@@ -6,7 +6,7 @@ CampusBid is a campus-only second-hand auction marketplace for students. Each li
 
 ## Planned features
 
-- Student registration with configurable college email verification
+- Student registration with Kongu email validation and verification
 - Listing creation and management with validated photos
 - Searchable marketplace, auction details, and public bid history
 - Server-authoritative, concurrency-safe bidding
@@ -67,7 +67,7 @@ Configure `.env` before starting. Generate a session secret with:
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 ```
 
-The default MongoDB URI is for a local development database. For Atlas, set `MONGODB_URI` to the connection string in your local `.env`; do not commit it. The allowed college email domains are configurable and are intentionally not assumed. Development verification returns a one-time token in the response and must never be treated as production email verification. Production startup requires `EMAIL_PROVIDER=smtp`, `EMAIL_FROM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `COOKIE_SECURE=true`; verification links expire after 24 hours.
+The default MongoDB URI is for a local development database. For Atlas, set `MONGODB_URI` to the connection string in your local `.env`; do not commit it. Registration accepts only valid Kongu college addresses ending in `@kongu.edu`. Development verification returns a one-time token in the response and must never be treated as production email verification. Production startup requires `EMAIL_PROVIDER=smtp`, `EMAIL_FROM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `COOKIE_SECURE=true`; verification links expire after 24 hours.
 
 Local development photos are content-sniffed, size-limited, and stored under the ignored `uploads/` folder. For persistent production photos, set `IMAGE_STORAGE_PROVIDER=cloudinary` and configure `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET`. AI is optional and is not required for the basic marketplace.
 

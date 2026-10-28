@@ -18,7 +18,7 @@ Accepted bids are immutable embedded records on each listing. Conditional atomic
 
 ## Identity and privacy
 
-Passwords are hashed. Authenticated requests use secure, HTTP-only cookies. College email domains and production verification provider are configuration, not assumptions. Public bid history uses bidder aliases and does not expose account email or credentials.
+Passwords are hashed. Authenticated requests use secure, HTTP-only cookies. Registration is restricted to valid `@kongu.edu` student addresses, with one-time verification links delivered through the configured production email provider. Public bid history uses bidder aliases and does not expose account email or credentials.
 
 ## Deployment boundary
 

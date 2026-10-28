@@ -4,6 +4,7 @@ import { useForm } from "react-hook-form";
 import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { io } from "socket.io-client";
 import { z } from "zod";
+import { konguEmailSchema, normalizedEmailSchema, registrationPasswordSchema } from "../../../shared/registration-validation.js";
 import { api, ApiError } from "./api";
 import { countdown, formatRupees, formatTime } from "./format";
 import type { Listing, User } from "./types";
@@ -471,12 +472,18 @@ function ListingDetail() {
   );
 }
 
-const authSchema = z.object({
-  email: z.string().email("Enter a valid college email address."),
-  password: z.string().min(10, "Password must be at least 10 characters.").max(128),
-  displayName: z.string().trim().min(2, "Enter a display name.").max(60).optional()
-});
-type AuthInput = z.infer<typeof authSchema>;
+function createAuthSchema(registering: boolean) {
+  return z.object({
+    email: registering ? konguEmailSchema : normalizedEmailSchema,
+    password: registering ? registrationPasswordSchema : z.string().min(1, "Enter your password.").max(128),
+    displayName: z.string().trim().min(2, "Enter a display name.").max(60).optional()
+  }).superRefine((values, context) => {
+    if (registering && !values.displayName) {
+      context.addIssue({ code: "custom", path: ["displayName"], message: "Enter a display name." });
+    }
+  });
+}
+type AuthInput = z.input<ReturnType<typeof createAuthSchema>>;
 
 function AuthPage({ mode }: { mode: "login" | "register" }) {
   const { user, setUser } = useAuth();
@@ -486,7 +493,7 @@ function AuthPage({ mode }: { mode: "login" | "register" }) {
   const [verificationToken, setVerificationToken] = useState("");
   const [error, setError] = useState("");
   const registering = mode === "register";
-  const form = useForm<AuthInput>({ resolver: zodResolver(authSchema) });
+  const form = useForm<AuthInput>({ resolver: zodResolver(createAuthSchema(registering)) });
   if (user) return <Navigate to="/dashboard" replace />;
   const submit = form.handleSubmit(async (values) => {
     setError("");
@@ -525,7 +532,7 @@ function AuthPage({ mode }: { mode: "login" | "register" }) {
     <div className="mx-auto w-full max-w-[470px]">
       <p className="section-kicker">{registering ? "Join the community" : "Student access"}</p>
       <h1 className="mt-3 font-display text-4xl">{registering ? "Create your account" : "Good to see you."}</h1>
-      <p className="mt-3 text-sm leading-6 text-ink/60">{registering ? "Use your college email. Your domain is checked against campus configuration." : "Sign in to bid, manage listings, and meet your campus community."}</p>
+      <p className="mt-3 text-sm leading-6 text-ink/60">{registering ? "Register with your Kongu college email address." : "Sign in to bid, manage listings, and meet your campus community."}</p>
       {error && <ErrorBanner message={error} />}
       {verificationToken ? <div className="mt-6 rounded-2xl border border-sun/40 bg-[#fff9f0] p-5">
         <p className="font-semibold">Verify your email (local development)</p>
@@ -533,10 +540,10 @@ function AuthPage({ mode }: { mode: "login" | "register" }) {
         <label className="field-label mt-4" htmlFor="verify-token">One-time verification token</label>
         <input id="verify-token" className="field mt-2" value={verificationToken} onChange={(event) => setVerificationToken(event.target.value)} />
         <button className="button-primary mt-3 w-full" onClick={() => void verifyDevelopment()}>Verify and continue</button>
-      </div> : <form onSubmit={submit} className="mt-7 space-y-4">
+      </div> : <form noValidate onSubmit={submit} className="mt-7 space-y-4">
         {registering && <Field label="Display name" error={form.formState.errors.displayName?.message}><input className="field" autoComplete="nickname" {...form.register("displayName")} placeholder="How should others see you?" /></Field>}
-        <Field label="College email" error={form.formState.errors.email?.message}><input className="field" type="email" autoComplete="email" {...form.register("email")} placeholder="you@college.edu" /></Field>
-        <Field label="Password" error={form.formState.errors.password?.message}><input className="field" type="password" autoComplete={registering ? "new-password" : "current-password"} {...form.register("password")} placeholder={registering ? "At least 10 characters" : "Your password"} /></Field>
+        <Field label="College email" error={form.formState.errors.email?.message}><input className="field" type="email" inputMode="email" autoComplete="email" {...form.register("email")} placeholder="student@kongu.edu" /></Field>
+        <Field label="Password" error={form.formState.errors.password?.message}><input className="field" type="password" autoComplete={registering ? "new-password" : "current-password"} {...form.register("password")} placeholder={registering ? "8+ chars, upper/lowercase, number, special" : "Your password"} /></Field>
         <button disabled={form.formState.isSubmitting} className="button-primary w-full !py-3.5">{form.formState.isSubmitting ? "Please wait…" : registering ? "Create account" : "Log in"}</button>
       </form>}
       <p className="mt-6 text-center text-sm text-ink/60">{registering ? "Already a member?" : "New to campusbid?"} <Link className="font-semibold text-forest underline underline-offset-4" to={registering ? "/login" : "/register"}>{registering ? "Log in" : "Create an account"}</Link></p>

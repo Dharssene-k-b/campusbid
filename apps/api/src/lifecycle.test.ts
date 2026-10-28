@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import supertest from "supertest";
 import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
 
 process.env.NODE_ENV = "test";
 process.env.MONGODB_URI = "mongodb://127.0.0.1:27017/campusbid_test";
 process.env.FRONTEND_URL = "http://localhost:5173";
 
-const [{ createApp }, { closeExpiredAuctions }] = await Promise.all([
+const [{ createApp }, { closeExpiredAuctions }, models] = await Promise.all([
   import("./app.js"),
   import("./auction.js"),
   import("./models.js")
@@ -23,7 +24,7 @@ async function createStudent(email: string, displayName: string): Promise<Studen
   const agent = supertest.agent(app);
   const registration = await agent.post("/api/auth/register").send({
     email,
-    password: "campusbid-test-password",
+    password: "CampusBid@123",
     displayName
   });
   expect(registration.status).toBe(201);
@@ -67,9 +68,9 @@ afterAll(async () => {
 
 describe("CampusBid basic auction lifecycle", () => {
   it("verifies students, enforces auction rules, closes, reserves, and completes a handover", async () => {
-    const seller = await createStudent("seller@campus.test", "Senior Seller");
-    const first = await createStudent("first@campus.test", "Junior One");
-    const second = await createStudent("second@campus.test", "Junior Two");
+    const seller = await createStudent("seller@kongu.edu", "Senior Seller");
+    const first = await createStudent("first@kongu.edu", "Junior One");
+    const second = await createStudent("second@kongu.edu", "Junior Two");
     const listingId = (await createListing(seller, new Date(now.getTime() + 60_000)))._id;
 
     expect((await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 199 })).status).toBe(400);
@@ -133,17 +134,17 @@ describe("CampusBid basic auction lifecycle", () => {
   it("rejects unverified and unauthorized operations, and preserves cancellation history", async () => {
     const registering = supertest.agent(app);
     const response = await registering.post("/api/auth/register").send({
-      email: "pending@campus.test",
-      password: "campusbid-test-password",
+      email: "pending@kongu.edu",
+      password: "CampusBid@123",
       displayName: "Pending Student"
     });
     expect(response.status).toBe(201);
     expect((await registering.post("/api/listings").send({})).status).toBe(401);
     expect((await registering.post("/api/auth/verify").send({ token: "invalid-token-invalid-token" })).status).toBe(400);
 
-    const seller = await createStudent("seller-two@campus.test", "Another Seller");
-    const bidder = await createStudent("bidder-three@campus.test", "Another Bidder");
-    const outsider = await createStudent("outsider@campus.test", "Campus Outsider");
+    const seller = await createStudent("seller-two@kongu.edu", "Another Seller");
+    const bidder = await createStudent("bidder-three@kongu.edu", "Another Bidder");
+    const outsider = await createStudent("outsider@kongu.edu", "Campus Outsider");
     const listingId = (await createListing(seller, new Date(now.getTime() + 120_000), "Used campus calculator"))._id;
     expect((await outsider.agent.patch(`/api/listings/${listingId}`).send({ title: "Not yours" })).status).toBe(404);
     expect((await bidder.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 200 })).status).toBe(201);
@@ -158,8 +159,8 @@ describe("CampusBid basic auction lifecycle", () => {
   });
 
   it("marks no-bid auctions unsold and records seller rejection and failed pickup", async () => {
-    const seller = await createStudent("seller-three@campus.test", "Graduating Seller");
-    const buyer = await createStudent("buyer-four@campus.test", "Campus Buyer");
+    const seller = await createStudent("seller-three@kongu.edu", "Graduating Seller");
+    const buyer = await createStudent("buyer-four@kongu.edu", "Campus Buyer");
     const noBidId = (await createListing(seller, new Date(now.getTime() + 10_000), "Unbid calculator"))._id;
     const rejectedId = (await createListing(seller, new Date(now.getTime() + 20_000), "Rejected calculator"))._id;
     const failedId = (await createListing(seller, new Date(now.getTime() + 30_000), "Pickup calculator"))._id;
@@ -181,7 +182,7 @@ describe("CampusBid basic auction lifecycle", () => {
   });
 
   it("rejects invalid photo references and invalid combined price ranges", async () => {
-    const seller = await createStudent("seller-four@campus.test", "Book Seller");
+    const seller = await createStudent("seller-four@kongu.edu", "Book Seller");
     const invalidUpload = await seller.agent.post("/api/uploads").attach("photo", Buffer.from("this is not an image"), { filename: "image.png", contentType: "image/png" });
     expect(invalidUpload.status).toBe(400);
     const invalid = await seller.agent.post("/api/listings").send({
@@ -202,16 +203,87 @@ describe("CampusBid basic auction lifecycle", () => {
   it("expires verification links and issues a fresh development link on resend", async () => {
     const agent = supertest.agent(app);
     const registered = await agent.post("/api/auth/register").send({
-      email: "expired@campus.test",
-      password: "campusbid-test-password",
+      email: "expired@kongu.edu",
+      password: "CampusBid@123",
       displayName: "Expired Link"
     });
     expect(registered.status).toBe(201);
     now = new Date(now.getTime() + 24 * 60 * 60 * 1000 + 1);
     expect((await agent.post("/api/auth/verify").send({ token: registered.body.developmentVerificationToken })).status).toBe(400);
-    const resent = await agent.post("/api/auth/resend-verification").send({ email: "expired@campus.test" });
+    const resent = await agent.post("/api/auth/resend-verification").send({ email: "expired@kongu.edu" });
     expect(resent.status).toBe(200);
     expect(resent.body.developmentVerificationToken).toBeTruthy();
     expect((await agent.post("/api/auth/verify").send({ token: resent.body.developmentVerificationToken })).status).toBe(200);
+  });
+
+  it("normalizes Kongu addresses, preserves password hashing and duplicate detection, and blocks invalid registrations", async () => {
+    const before = await models.User.countDocuments();
+    const invalidEmails = [
+      "student@gmail.com",
+      "student@kongu.ac.in",
+      "student@other.edu",
+      "studentkongu.edu",
+      "student@@kongu.edu",
+      "@kongu.edu",
+      "student@kongu.edu.example",
+      "",
+      "not an email"
+    ];
+    for (const [index, email] of invalidEmails.entries()) {
+      const response = await supertest(app).post("/api/auth/register").send({
+        email,
+        password: "Campus@123",
+        displayName: `Invalid Email ${index}`
+      });
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe("Invalid registration details.");
+    }
+
+    const invalidPasswords = [
+      "campus@123",
+      "CAMPUS@123",
+      "Campus@abc",
+      "Campus123",
+      "Cam@12",
+      "Campus @123",
+      "",
+      "Campus\t@123"
+    ];
+    for (const [index, password] of invalidPasswords.entries()) {
+      const response = await supertest(app).post("/api/auth/register").send({
+        email: `invalid-password-${index}@kongu.edu`,
+        password,
+        displayName: `Invalid Password ${index}`
+      });
+      expect(response.status).toBe(400);
+      if (password) expect(JSON.stringify(response.body)).not.toContain(password);
+    }
+    expect(await models.User.countDocuments()).toBe(before);
+
+    const agent = supertest.agent(app);
+    const registration = await agent.post("/api/auth/register").send({
+      email: "  Student+Lab@KONGU.EDU  ",
+      password: "Campus@123",
+      displayName: "Valid Student"
+    });
+    expect(registration.status).toBe(201);
+    const student = await models.User.findOne({ email: "student+lab@kongu.edu" }).select("+passwordHash");
+    expect(student).not.toBeNull();
+    expect(student?.passwordHash).not.toBe("Campus@123");
+    expect(await bcrypt.compare("Campus@123", student!.passwordHash)).toBe(true);
+
+    const duplicate = await supertest(app).post("/api/auth/register").send({
+      email: "student+lab@kongu.edu",
+      password: "Campus@123",
+      displayName: "Duplicate Student"
+    });
+    expect(duplicate.status).toBe(409);
+
+    const verified = await agent.post("/api/auth/verify").send({ token: registration.body.developmentVerificationToken });
+    expect(verified.status).toBe(200);
+    const login = await agent.post("/api/auth/logout");
+    expect(login.status).toBe(204);
+    const reLogin = await agent.post("/api/auth/login").send({ email: "  STUDENT+LAB@KONGU.EDU ", password: "Campus@123" });
+    expect(reLogin.status).toBe(200);
   });
 });

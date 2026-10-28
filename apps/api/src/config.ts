@@ -7,7 +7,6 @@ const schema = z.object({
   FRONTEND_URL: z.string().url().default("http://localhost:5173"),
   MONGODB_URI: z.string().min(1).default("mongodb://127.0.0.1:27017/campusbid"),
   SESSION_SECRET: z.string().min(32, "SESSION_SECRET must contain at least 32 characters").default("development-only-change-this-session-secret"),
-  COLLEGE_EMAIL_DOMAINS: z.string().default(""),
   EMAIL_PROVIDER: z.enum(["development", "smtp"]).default("development"),
   EMAIL_FROM: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
   SMTP_HOST: z.string().optional(),
@@ -29,9 +28,6 @@ if (!parsed.success) {
   throw new Error(`Invalid environment configuration:\n${fields}`);
 }
 
-if (parsed.data.NODE_ENV === "production" && !parsed.data.COLLEGE_EMAIL_DOMAINS.trim()) {
-  throw new Error("COLLEGE_EMAIL_DOMAINS must be configured in production.");
-}
 if (parsed.data.NODE_ENV === "production" && parsed.data.SESSION_SECRET.startsWith("development-only")) {
   throw new Error("SESSION_SECRET must be replaced with a securely generated value in production.");
 }
@@ -59,6 +55,5 @@ if (parsed.data.IMAGE_STORAGE_PROVIDER === "cloudinary" && (!parsed.data.CLOUDIN
 
 export const config = {
   ...parsed.data,
-  allowedDomains: parsed.data.COLLEGE_EMAIL_DOMAINS.split(",").map((domain) => domain.trim().toLowerCase()).filter(Boolean),
   secureCookie: parsed.data.COOKIE_SECURE === "true"
 };

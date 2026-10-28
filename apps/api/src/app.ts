@@ -14,6 +14,7 @@ import nodemailer from "nodemailer";
 import { v2 as cloudinary } from "cloudinary";
 import { Types } from "mongoose";
 import { z } from "zod";
+import { konguEmailSchema, normalizedEmailSchema, registrationPasswordSchema } from "../../../shared/registration-validation.js";
 import { config } from "./config.js";
 import { Handover, Listing, Notification, PhotoAsset, User, toPaise, toRupees } from "./models.js";
 import { confirmHandover, decideSale, makeNotification, markFailedPickup } from "./auction.js";
@@ -132,20 +133,14 @@ function requireVerified(req: Request, res: Response, next: NextFunction) {
     .catch(next);
 }
 
-function emailAllowed(email: string): boolean {
-  if (!config.allowedDomains.length) return config.NODE_ENV !== "production";
-  const domain = email.split("@").at(-1)?.toLowerCase();
-  return Boolean(domain && config.allowedDomains.includes(domain));
-}
-
 function getRouteId(req: Request): string {
   const value = req.params.id;
   return Array.isArray(value) ? value[0] ?? "" : value ?? "";
 }
 
 const registrationSchema = z.object({
-  email: z.string().email().max(254).transform((value) => value.toLowerCase()),
-  password: z.string().min(10).max(128),
+  email: konguEmailSchema,
+  password: registrationPasswordSchema,
   displayName: z.string().trim().min(2).max(60)
 });
 const listingSchema = z.object({
@@ -183,6 +178,7 @@ export function createApp(services: AppServices = defaultServices) {
     limit: 30,
     standardHeaders: "draft-8",
     legacyHeaders: false,
+    skip: () => config.NODE_ENV === "test",
     message: { error: "Too many authentication attempts. Try again later." }
   });
   app.use("/api", rateLimit({ windowMs: 15 * 60 * 1000, limit: 240, standardHeaders: "draft-8", legacyHeaders: false, message: { error: "Too many requests. Try again shortly." } }));
@@ -192,9 +188,14 @@ export function createApp(services: AppServices = defaultServices) {
 
   app.post("/api/auth/register", asyncRoute(async (req, res) => {
     const parsed = registrationSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: "Invalid registration details.", details: parsed.error.issues });
+    if (!parsed.success) {
+      const fields = parsed.error.issues.map((issue) => ({
+        field: String(issue.path[0] ?? "form"),
+        message: issue.message
+      }));
+      return res.status(400).json({ error: "Invalid registration details.", fields });
+    }
     const { email, password, displayName } = parsed.data;
-    if (!emailAllowed(email)) return res.status(400).json({ error: "Use an email address from an allowed college domain." });
     const passwordHash = await bcrypt.hash(password, 12);
     const rawToken = randomBytes(32).toString("base64url");
     const verificationTokenHash = createHash("sha256").update(rawToken).digest("hex");
@@ -236,11 +237,11 @@ export function createApp(services: AppServices = defaultServices) {
   }, services));
 
   app.post("/api/auth/resend-verification", asyncRoute(async (req, res) => {
-    const input = z.object({ email: z.string().email().max(254) }).safeParse(req.body);
+    const input = z.object({ email: normalizedEmailSchema }).safeParse(req.body);
     if (!input.success) return res.status(400).json({ error: "Enter a valid email address." });
     const response = { message: "If an unverified account exists for that address, a new verification link has been sent." };
     const user = await User.findOne({ email: input.data.email.toLowerCase(), verifiedAt: null }).select("+verificationTokenHash +verificationExpiresAt");
-    if (!user || !emailAllowed(user.email)) return res.json(response);
+    if (!user || !konguEmailSchema.safeParse(user.email).success) return res.json(response);
     const rawToken = randomBytes(32).toString("base64url");
     user.verificationTokenHash = createHash("sha256").update(rawToken).digest("hex");
     user.verificationExpiresAt = new Date(services.now().getTime() + 24 * 60 * 60 * 1000);
@@ -255,9 +256,9 @@ export function createApp(services: AppServices = defaultServices) {
   }, services));
 
   app.post("/api/auth/login", asyncRoute(async (req, res) => {
-    const input = z.object({ email: z.string().email().max(254), password: z.string().min(1).max(128) }).safeParse(req.body);
+    const input = z.object({ email: normalizedEmailSchema, password: z.string().min(1).max(128) }).safeParse(req.body);
     if (!input.success) return res.status(400).json({ error: "Email and password are required." });
-    const user = await User.findOne({ email: input.data.email.toLowerCase(), accountStatus: "active" }).select("+passwordHash");
+    const user = await User.findOne({ email: input.data.email, accountStatus: "active" }).select("+passwordHash");
     if (!user || !(await bcrypt.compare(input.data.password, user.passwordHash))) return res.status(401).json({ error: "Email or password is incorrect." });
     if (!user.verifiedAt) return res.status(403).json({ error: "Verify your college email before logging in." });
     await new Promise<void>((resolve, reject) => req.session.regenerate((error) => error ? reject(error) : resolve()));

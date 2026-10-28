@@ -26,7 +26,7 @@ Before any accepted bid, an owner may edit validated listing details. Once a bid
 
 ## Identity and privacy
 
-No college domain is assumed; operators configure allowed domains. Public bid history shows privacy-conscious aliases, never email or private contact information. Local verification is development-only.
+Registration accepts valid Kongu college email addresses ending exactly in `@kongu.edu`; email is trimmed and normalized to lowercase before storage. Public bid history shows privacy-conscious aliases, never email or private contact information. Local verification is development-only.
 
 ## Advanced bid transparency
 

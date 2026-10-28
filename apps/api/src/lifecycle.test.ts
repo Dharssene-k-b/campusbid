@@ -123,6 +123,8 @@ describe("CampusBid basic auction lifecycle", () => {
     expect((await winner.agent.post(`/api/listings/${listingId}/handover/confirm`)).status).toBe(409);
     expect((await winner.agent.post(`/api/listings/${listingId}/handover/failed-pickup`)).status).toBe(409);
     expect((await seller.agent.get(`/api/listings/${listingId}`)).body.listing.saleOutcome).toBe("Completed");
+    expect((await seller.agent.post(`/api/listings/${listingId}/cancel`)).status).toBe(409);
+    expect((await seller.agent.post(`/api/listings/${listingId}/decision`).send({ decision: "reject" })).status).toBe(409);
 
     expect((await seller.agent.get("/api/notifications")).body.items.length).toBeGreaterThan(0);
     expect((await first.agent.get("/api/dashboard")).body.bids.length).toBeGreaterThan(0);
@@ -148,7 +150,9 @@ describe("CampusBid basic auction lifecycle", () => {
     const listingId = (await createListing(seller, new Date(now.getTime() + 120_000), "Used campus calculator"))._id;
     expect((await outsider.agent.patch(`/api/listings/${listingId}`).send({ title: "Not yours" })).status).toBe(404);
     expect((await bidder.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 200 })).status).toBe(201);
+    expect((await outsider.agent.post(`/api/listings/${listingId}/cancel`)).status).toBe(409);
     expect((await seller.agent.post(`/api/listings/${listingId}/cancel`)).status).toBe(200);
+    expect((await seller.agent.post(`/api/listings/${listingId}/cancel`)).status).toBe(409);
     const cancelled = await bidder.agent.get(`/api/listings/${listingId}`);
     expect(cancelled.body.listing.biddingStatus).toBe("Cancelled");
     expect(cancelled.body.bidHistory).toHaveLength(1);
@@ -169,12 +173,15 @@ describe("CampusBid basic auction lifecycle", () => {
     now = new Date(now.getTime() + 15_000);
     expect(await closeExpiredAuctions(now)).toBe(1);
     expect((await seller.agent.get(`/api/listings/${noBidId}`)).body.listing.saleOutcome).toBe("Unsold");
+    expect((await seller.agent.post(`/api/listings/${noBidId}/cancel`)).status).toBe(409);
+    expect((await seller.agent.post(`/api/listings/${noBidId}/decision`).send({ decision: "approve" })).status).toBe(409);
     expect((await seller.agent.get(`/api/listings/${rejectedId}`)).body.listing.biddingStatus).toBe("Open");
     now = new Date(now.getTime() + 16_000);
     expect(await closeExpiredAuctions(now)).toBe(2);
     expect(await closeExpiredAuctions(now)).toBe(0);
     expect((await seller.agent.post(`/api/listings/${rejectedId}/decision`).send({ decision: "reject" })).status).toBe(200);
     expect((await seller.agent.get(`/api/listings/${rejectedId}`)).body.listing.saleOutcome).toBe("Rejected");
+    expect((await seller.agent.post(`/api/listings/${rejectedId}/decision`).send({ decision: "approve" })).status).toBe(409);
     expect((await buyer.agent.post(`/api/listings/${failedId}/decision`).send({ decision: "approve" })).status).toBe(409);
     expect((await seller.agent.post(`/api/listings/${failedId}/decision`).send({ decision: "approve" })).status).toBe(200);
     expect((await buyer.agent.post(`/api/listings/${failedId}/handover/failed-pickup`)).status).toBe(204);

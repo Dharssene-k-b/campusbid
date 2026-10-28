@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useCallback, useEffect, useState, createContext, useContext, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, createContext, useContext, type FormEvent, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
 import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { io } from "socket.io-client";
@@ -327,6 +327,7 @@ function ListingDetail() {
   const [bid, setBid] = useState("");
   const [now, setNow] = useState(Date.now());
   const [handover, setHandover] = useState<{ sellerConfirmedAt: string | null; buyerConfirmedAt: string | null; failedPickupAt: string | null } | null>(null);
+  const [canceling, setCanceling] = useState(false);
   const load = useCallback(async () => {
     setError("");
     try {
@@ -393,6 +394,29 @@ function ListingDetail() {
   const isSeller = item.isSeller ?? false;
   const isWinner = item.isProvisionalWinner ?? false;
   const isOpen = item.biddingStatus === "Open" && new Date(item.closesAt).getTime() > now;
+  const canCancel = isSeller
+    && ["Open", "Scheduled"].includes(item.biddingStatus)
+    && item.saleOutcome === "Pending seller decision"
+    && new Date(item.closesAt).getTime() > now;
+  const canEdit = isSeller && item.biddingStatus === "Open" && new Date(item.closesAt).getTime() > now;
+  const canReviewWinningBid = isSeller
+    && item.biddingStatus === "Closed"
+    && item.saleOutcome === "Pending seller decision"
+    && item.bidHistory.length > 0
+    && item.hasProvisionalWinner === true;
+  const cancel = async () => {
+    if (!window.confirm("Cancel this auction? Existing bids and history will be preserved, and all bidders will be notified.")) return;
+    setCanceling(true);
+    try {
+      const result = await api<{ listing: Listing }>(`/listings/${id}/cancel`, { method: "POST" });
+      setItem((current) => current ? { ...current, ...result.listing, bidHistory: current.bidHistory } : result.listing);
+      toast("Auction cancelled. Bid history was preserved.");
+    } catch (failure) {
+      toast(messageOf(failure), "error");
+    } finally {
+      setCanceling(false);
+    }
+  };
   return (
     <div className="page-shell py-8 md:py-12">
       <Link to="/" className="mb-6 inline-flex items-center gap-2 text-sm font-medium text-ink/60 hover:text-forest">← Marketplace</Link>
@@ -443,11 +467,12 @@ function ListingDetail() {
             <p className="mt-2 text-xs text-ink/50">Bids are binding. The server verifies the minimum and closing time.</p>
           </form>}
           {isOpen && !user && <Link className="button-primary mt-5 w-full" to="/login">Log in to place a bid</Link>}
-          {isSeller && <div className="mt-5 flex gap-2">{item.bidHistory.length === 0 && <Link className="button-outline flex-1" to={`/listings/${id}/edit`}>Edit listing</Link>}<button className="button-outline flex-1" onClick={() => void cancelListing(id, toast, load)}>Cancel auction</button></div>}
+          {isSeller && isOpen && <p className="mt-4 rounded-xl bg-canvas p-3 text-sm text-ink/60">Bidding is open. The current leading bid and minimum next bid are shown above.</p>}
+          {isSeller && (canEdit || canCancel) && <div className="mt-5 flex gap-2">{canEdit && item.bidHistory.length === 0 && <Link className="button-outline flex-1" to={`/listings/${id}/edit`}>Edit listing</Link>}{canCancel && <button className="button-outline flex-1" disabled={canceling} onClick={() => void cancel()}>{canceling ? "Cancelling…" : "Cancel auction"}</button>}</div>}
           {isSeller && item.bidHistory.length > 0 && <p className="mt-4 text-xs text-ink/50">Listing edits are locked after the first accepted bid. You may still cancel the auction; bid history is preserved.</p>}
-          {isSeller && item.saleOutcome === "Pending seller decision" && <div className="mt-5 rounded-2xl border border-sun/40 bg-[#fff9f0] p-4">
+          {canReviewWinningBid && <div className="mt-5 rounded-2xl border border-sun/40 bg-[#fff9f0] p-4">
             <p className="font-semibold">Review the provisional winner</p><p className="mt-1 text-sm text-ink/60">Approve to reserve the item, or reject the winning bid.</p>
-            <div className="mt-4 flex gap-2"><button className="button-primary flex-1" onClick={() => void decide("approve")}>Approve bid</button><button className="button-outline flex-1" onClick={() => void decide("reject")}>Reject</button></div>
+            <div className="mt-4 flex gap-2"><button className="button-primary flex-1" onClick={() => void decide("approve")}>Approve Winning Bid</button><button className="button-outline flex-1" onClick={() => void decide("reject")}>Reject Winning Bid</button></div>
           </div>}
           {item.saleOutcome === "Pending seller decision" && !isSeller && <p className="mt-4 rounded-xl bg-canvas p-3 text-sm text-ink/60">This auction has closed. The seller is reviewing the leading bid.</p>}
           {item.saleOutcome === "Awaiting handover" && user && (isSeller || isWinner) && <div className="mt-5 rounded-2xl bg-mint p-4">
@@ -464,7 +489,8 @@ function ListingDetail() {
           {item.saleOutcome === "Completed" && <p className="mt-5 rounded-2xl bg-mint p-4 font-semibold text-forest">Sale completed · handover confirmed by both parties.</p>}
           {item.saleOutcome === "Rejected" && <p className="mt-5 rounded-2xl bg-canvas p-4 text-sm text-ink/65">The seller declined this winning bid.</p>}
           {item.saleOutcome === "Failed pickup" && <p className="mt-5 rounded-2xl bg-[#fff9f0] p-4 text-sm text-ink/65">A failed pickup was recorded. The seller can review the item before relisting.</p>}
-          {item.saleOutcome === "Unsold" && <p className="mt-5 rounded-2xl bg-canvas p-4 text-sm text-ink/65">This auction ended without accepted bids.</p>}
+          {item.saleOutcome === "Unsold" && <p className="mt-5 rounded-2xl bg-canvas p-4 text-sm text-ink/65">No bids were received. This item is unsold.</p>}
+          {item.saleOutcome === "Cancelled" && <p className="mt-5 rounded-2xl bg-canvas p-4 text-sm text-ink/65">This auction was cancelled by the seller.</p>}
           <div className="mt-6 border-t border-line pt-5 text-xs leading-5 text-ink/50">CampusBid displays the server's accepted bids. The countdown is informational; the server decides whether a bid arrives before closing.</div>
         </aside>
       </div>
@@ -585,9 +611,15 @@ function ListingForm({ edit = false }: { edit?: boolean }) {
   const toast = useToast();
   const [item, setItem] = useState<Listing | null>(null);
   const [photos, setPhotos] = useState<string[]>([]);
+  const [pendingPhotoPreviews, setPendingPhotoPreviews] = useState<Array<{ key: string; src: string; name: string }>>([]);
   const [photoError, setPhotoError] = useState("");
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [draggingPhotos, setDraggingPhotos] = useState(false);
+  const uploadedPhotoKeys = useRef(new Map<string, string>());
+  const uploadingPhotos = useRef(false);
+  const pendingPhotoKeys = useRef(new Set<string>());
+  const removedPhotoKeys = useRef(new Set<string>());
   const form = useForm<ListingFormInput>({
     resolver: zodResolver(listingFormSchema),
     defaultValues: { category: "Other", condition: "Good", startingPrice: 100, minimumIncrement: 10 }
@@ -611,24 +643,72 @@ function ListingForm({ edit = false }: { edit?: boolean }) {
   }, [edit, id, resetForm]);
 
   const addPhotos = async (files: FileList | null) => {
-    if (!files?.length) return;
+    if (!files?.length || uploadingPhotos.current) return;
     setPhotoError("");
-    if (photos.length + files.length > 5) { setPhotoError("Choose up to five photos."); return; }
+    const pending: Array<{ file: File; key: string }> = [];
+    const seen = new Set([...uploadedPhotoKeys.current.values(), ...pendingPhotoKeys.current]);
+    const errors: string[] = [];
+    let remaining = 5 - photos.length;
+    for (const file of Array.from(files)) {
+      const key = `${file.name.toLowerCase()}:${file.size}:${file.lastModified}:${file.type}`;
+      if (seen.has(key)) continue;
+      if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+        errors.push(`${file.name}: use a JPEG, PNG, or WebP image.`);
+        continue;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        errors.push(`${file.name}: images must be 5 MB or smaller.`);
+        continue;
+      }
+      if (remaining <= 0) {
+        errors.push("Choose up to five photos.");
+        break;
+      }
+      pending.push({ file, key });
+      seen.add(key);
+      remaining -= 1;
+    }
+    if (!pending.length) {
+      if (errors.length) setPhotoError(errors.join(" "));
+      return;
+    }
+    uploadingPhotos.current = true;
+    for (const { key } of pending) pendingPhotoKeys.current.add(key);
+    setPendingPhotoPreviews((current) => [
+      ...current,
+      ...pending.map(({ file, key }) => ({ key, src: URL.createObjectURL(file), name: file.name }))
+    ]);
     setUploading(true);
     try {
-      const uploaded: string[] = [];
-      for (const file of Array.from(files)) {
-        if (!["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 5 * 1024 * 1024) {
-          throw new Error("Photos must be JPEG, PNG, or WebP and 5 MB or smaller.");
-        }
+      for (const { file, key } of pending) {
         const data = new FormData();
         data.set("photo", file);
-        const result = await api<{ url: string }>("/uploads", { method: "POST", body: data });
-        uploaded.push(result.url);
+        try {
+          const result = await api<{ url: string }>("/uploads", { method: "POST", body: data });
+          if (!removedPhotoKeys.current.has(key)) {
+            uploadedPhotoKeys.current.set(result.url, key);
+            setPhotos((current) => current.includes(result.url) ? current : [...current, result.url]);
+          }
+        } catch (failure) {
+          errors.push(`${file.name}: ${messageOf(failure)}`);
+        }
       }
-      setPhotos((current) => [...current, ...uploaded]);
-    } catch (failure) { setPhotoError(messageOf(failure)); }
-    finally { setUploading(false); }
+      if (errors.length) setPhotoError(errors.join(" "));
+    }
+    finally {
+      for (const { key } of pending) {
+        pendingPhotoKeys.current.delete(key);
+        removedPhotoKeys.current.delete(key);
+      }
+      setPendingPhotoPreviews((current) => {
+        for (const preview of current) {
+          if (pending.some(({ key }) => key === preview.key)) URL.revokeObjectURL(preview.src);
+        }
+        return current.filter((preview) => !pending.some(({ key }) => key === preview.key));
+      });
+      setUploading(false);
+    }
+    uploadingPhotos.current = false;
   };
 
   const submit = form.handleSubmit(async (values) => {
@@ -668,13 +748,32 @@ function ListingForm({ edit = false }: { edit?: boolean }) {
       <Field label="Description" error={form.formState.errors.description?.message}><textarea className="field min-h-32 resize-y" {...form.register("description")} placeholder="Describe the item honestly: age, use, condition, and what's included." /></Field>
       <div>
         <div className="flex items-end justify-between gap-3"><label className="field-label">Item photos <span className="font-normal text-ink/45">· up to 5</span></label><span className="text-xs text-ink/45">{photos.length}/5</span></div>
-        <label className="mt-2 flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-line bg-canvas px-4 py-7 text-center hover:border-forest">
-          <span className="text-2xl" aria-hidden="true">↥</span><span className="mt-2 text-sm font-semibold">Choose photos</span><span className="mt-1 text-xs text-ink/50">JPEG, PNG, or WebP · 5 MB max each</span>
-          <input className="sr-only" type="file" accept="image/jpeg,image/png,image/webp" multiple disabled={uploading || photos.length >= 5} onChange={(event) => { void addPhotos(event.target.files); event.target.value = ""; }} />
-        </label>
+        <div
+          role="region"
+          aria-label="Photo upload area"
+          onDragEnter={(event) => { event.preventDefault(); setDraggingPhotos(true); }}
+          onDragOver={(event) => { event.preventDefault(); setDraggingPhotos(true); }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingPhotos(false);
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            setDraggingPhotos(false);
+            void addPhotos(event.dataTransfer.files);
+          }}
+          className={`mt-2 rounded-2xl border border-dashed px-4 py-7 text-center transition-colors ${draggingPhotos ? "border-forest bg-mint/50 ring-2 ring-forest/20" : "border-line bg-canvas"}`}
+        >
+          <label className="flex cursor-pointer flex-col items-center justify-center">
+            <span className="text-2xl" aria-hidden="true">↥</span><span className="mt-2 text-sm font-semibold">Drop photos here or choose photos</span><span className="mt-1 text-xs text-ink/50">JPEG, PNG, or WebP · 5 MB max each</span>
+            <input aria-label="Choose item photos" className="sr-only" type="file" accept="image/jpeg,image/png,image/webp" multiple disabled={uploading || photos.length >= 5} onChange={(event) => { void addPhotos(event.target.files); event.target.value = ""; }} />
+          </label>
+        </div>
         {photoError && <p role="alert" className="mt-2 text-sm text-red-700">{photoError}</p>}
         {uploading && <p className="mt-2 text-sm text-ink/60">Uploading photos…</p>}
-        {photos.length > 0 && <div className="mt-3 grid grid-cols-3 gap-3 sm:grid-cols-5">{photos.map((photo) => <div key={photo} className="relative overflow-hidden rounded-xl border border-line"><img className="aspect-square w-full object-cover" src={photo} alt="Auction item" /><button className="absolute right-1 top-1 rounded-full bg-white px-2 py-1 text-xs shadow" type="button" aria-label="Remove photo" onClick={() => setPhotos((current) => current.filter((value) => value !== photo))}>×</button></div>)}</div>}
+        {(photos.length > 0 || pendingPhotoPreviews.length > 0) && <div className="mt-3 grid grid-cols-3 gap-3 sm:grid-cols-5">
+          {photos.map((photo) => <div key={photo} className="relative overflow-hidden rounded-xl border border-line"><img className="aspect-square w-full object-cover" src={photo} alt="Auction item preview" /><button className="absolute right-1 top-1 rounded-full bg-white px-2 py-1 text-xs shadow" type="button" aria-label="Remove photo" onClick={() => { uploadedPhotoKeys.current.delete(photo); setPhotos((current) => current.filter((value) => value !== photo)); }}>×</button></div>)}
+          {pendingPhotoPreviews.map((preview) => <div key={preview.key} className="relative overflow-hidden rounded-xl border border-line"><img className="aspect-square w-full object-cover" src={preview.src} alt={`${preview.name} preview`} /><button className="absolute right-1 top-1 rounded-full bg-white px-2 py-1 text-xs shadow" type="button" aria-label={`Remove ${preview.name}`} onClick={() => { removedPhotoKeys.current.add(preview.key); pendingPhotoKeys.current.delete(preview.key); URL.revokeObjectURL(preview.src); setPendingPhotoPreviews((current) => current.filter((value) => value.key !== preview.key)); }}>×</button></div>)}
+        </div>}
       </div>
       <div className="grid gap-5 sm:grid-cols-2">
         <Field label="Starting price (₹)" error={form.formState.errors.startingPrice?.message}><input className="field" type="number" min="0.01" step="0.01" {...form.register("startingPrice", { valueAsNumber: true })} /></Field>
@@ -778,15 +877,6 @@ function ErrorBanner({ message, onRetry }: { message: string; onRetry?: () => vo
 
 function NotFound() {
   return <div className="page-shell py-24 text-center"><p className="section-kicker">404 · not found</p><h1 className="mt-3 font-display text-4xl">This page took a detour.</h1><Link className="button-primary mt-6" to="/">Back to marketplace</Link></div>;
-}
-
-async function cancelListing(id: string, toast: (text: string, tone?: ToastMessage["tone"]) => void, reload: () => Promise<void>) {
-  if (!window.confirm("Cancel this auction? Existing bids and history will be preserved, and all bidders will be notified.")) return;
-  try {
-    await api(`/listings/${id}/cancel`, { method: "POST" });
-    toast("Auction cancelled. Bid history was preserved.");
-    await reload();
-  } catch (error) { toast(messageOf(error), "error"); }
 }
 
 function messageOf(error: unknown): string {

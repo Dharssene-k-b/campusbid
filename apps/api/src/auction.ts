@@ -1,5 +1,5 @@
 import { Types } from "mongoose";
-import { Handover, Listing, Notification, User } from "./models.js";
+import { Handover, Listing, Notification, User, type BidRecord } from "./models.js";
 import type { BiddingStatus, SaleOutcome } from "./models.js";
 
 export type Clock = () => Date;
@@ -18,17 +18,35 @@ export async function makeNotification(
   );
 }
 
-export async function closeExpiredAuctions(now: Date, emit?: (listingId: string) => void): Promise<number> {
-  const expired = await Listing.find({ biddingStatus: "Open", closesAt: { $lte: now } }).select("_id sellerId title bidHistory");
+function winningBid(bids: BidRecord[] | undefined, startingPricePaise: number): BidRecord | undefined {
+  return (bids ?? [])
+    .filter((bid) => Number.isSafeInteger(bid.amountPaise)
+      && bid.amountPaise >= startingPricePaise
+      && Types.ObjectId.isValid(bid.bidderId)
+      && bid.createdAt instanceof Date
+      && Number.isFinite(bid.createdAt.getTime()))
+    .sort((a, b) => b.amountPaise - a.amountPaise || a.createdAt.getTime() - b.createdAt.getTime())[0];
+}
+
+export async function closeExpiredAuctions(
+  now: Date,
+  emit?: (listingId: string) => void,
+  listingId?: string
+): Promise<number> {
+  const selector = { biddingStatus: "Open", closesAt: { $lte: now }, ...(listingId ? { _id: listingId } : {}) };
+  const expired = await Listing.find(selector).select("_id sellerId title bidHistory startingPricePaise");
   let closed = 0;
   for (const candidate of expired) {
-    const leadingBid = [...candidate.bidHistory].sort((a, b) => b.amountPaise - a.amountPaise || a.createdAt.getTime() - b.createdAt.getTime())[0];
+    const leadingBid = winningBid(candidate.bidHistory, candidate.startingPricePaise);
     const listing = await Listing.findOneAndUpdate(
       { _id: candidate._id, biddingStatus: "Open", closesAt: { $lte: now } },
       {
         $set: {
           biddingStatus: "Closed",
           saleOutcome: leadingBid ? "Pending seller decision" : "Unsold",
+          leadingBidId: leadingBid?.bidId ?? null,
+          leadingBidderId: leadingBid?.bidderId ?? null,
+          leadingAmountPaise: leadingBid?.amountPaise ?? null,
           provisionalWinnerId: leadingBid?.bidderId ?? null,
           updatedAt: now
         }
@@ -59,14 +77,26 @@ export async function decideSale(
     _id: listingId,
     sellerId,
     biddingStatus: "Closed",
+    closesAt: { $lte: now },
     saleOutcome: "Pending seller decision",
     provisionalWinnerId: { $ne: null }
   });
   if (!listing || !listing.provisionalWinnerId) throw new Error("This auction is not awaiting your decision.");
+  const persistedWinner = winningBid(listing.bidHistory, listing.startingPricePaise);
+  if (!persistedWinner || !persistedWinner.bidderId.equals(listing.provisionalWinnerId)) {
+    throw new Error("This auction has no valid provisional winning bid.");
+  }
 
   const outcome = decision === "approve" ? "Awaiting handover" : "Rejected";
   const updated = await Listing.findOneAndUpdate(
-    { _id: listingId, sellerId, biddingStatus: "Closed", saleOutcome: "Pending seller decision" },
+    {
+      _id: listingId,
+      sellerId,
+      biddingStatus: "Closed",
+      closesAt: { $lte: now },
+      saleOutcome: "Pending seller decision",
+      provisionalWinnerId: listing.provisionalWinnerId
+    },
     { $set: { saleOutcome: outcome, sellerDecisionAt: now, updatedAt: now } },
     { new: true }
   );

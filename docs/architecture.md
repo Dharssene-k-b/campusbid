@@ -14,7 +14,9 @@ The browser is not authoritative. The API owns identity, authorization, price va
 
 ## Auction consistency
 
-Accepted bids are immutable embedded records on each listing. Conditional atomic listing updates serialize competing bids without requiring a MongoDB replica set. Auction close and notification creation use conditional writes/idempotency keys. Startup reconciliation closes expired open auctions.
+Accepted bids are immutable embedded records on each listing. Conditional atomic listing updates serialize competing bids without requiring a MongoDB replica set. Auction close and notification creation use conditional writes/idempotency keys. Startup and request-time reconciliation close expired auctions from server time, derive the provisional winner from valid persisted bids, and mark empty auctions unsold.
+
+Photo selection and drag-and-drop share the same upload path, with five-photo, format, and 5 MB limits enforced by the client and API. Listing action controls reflect the persisted auction state; the API independently checks ownership and eligible state transitions.
 
 ## Identity and privacy
 

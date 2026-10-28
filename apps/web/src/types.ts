@@ -18,6 +18,7 @@ export type Listing = {
   sellerDisplayName?: string;
   isSeller?: boolean;
   isProvisionalWinner?: boolean;
+  hasProvisionalWinner?: boolean;
   title: string;
   category: "Cycles" | "Calculators" | "Books" | "Electronics" | "Other";
   description: string;

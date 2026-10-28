@@ -17,7 +17,7 @@ import { z } from "zod";
 import { konguEmailSchema, normalizedEmailSchema, registrationPasswordSchema } from "../../../shared/registration-validation.js";
 import { config } from "./config.js";
 import { Handover, Listing, Notification, PhotoAsset, User, toPaise, toRupees } from "./models.js";
-import { confirmHandover, decideSale, makeNotification, markFailedPickup } from "./auction.js";
+import { closeExpiredAuctions, confirmHandover, decideSale, makeNotification, markFailedPickup } from "./auction.js";
 
 declare module "express-session" {
   interface SessionData {
@@ -282,6 +282,9 @@ export function createApp(services: AppServices = defaultServices) {
   app.post("/api/uploads", requireVerified, uploadMiddleware().single("photo"), asyncRoute(async (req, res) => {
     const file = (req as Request & { file?: Express.Multer.File }).file;
     if (!file) return res.status(400).json({ error: "Choose an image file." });
+    if (!allowedPhotoTypes.has(file.mimetype)) {
+      return res.status(400).json({ error: "Only JPEG, PNG, or WebP images are accepted." });
+    }
     const detected = await fileTypeFromBuffer(file.buffer);
     if (!detected || !allowedPhotoTypes.has(detected.mime)) {
       return res.status(400).json({ error: "Only valid JPEG, PNG, or WebP images are accepted." });
@@ -373,6 +376,7 @@ export function createApp(services: AppServices = defaultServices) {
   app.get("/api/listings/:id", asyncRoute(async (req, res) => {
     const id = getRouteId(req);
     if (!Types.ObjectId.isValid(id)) return res.status(404).json({ error: "Auction not found." });
+    await closeExpiredAuctions(services.now(), services.emitAuctionUpdate, id);
     const listing = await Listing.findById(id).lean();
     if (!listing) return res.status(404).json({ error: "Auction not found." });
     const seller = await User.findById(listing.sellerId).select("displayName").lean();
@@ -381,9 +385,10 @@ export function createApp(services: AppServices = defaultServices) {
         ...safeListing(listing as never),
         sellerDisplayName: seller?.displayName ?? "Campus student",
         isSeller: Boolean(req.session.userId && listing.sellerId.toString() === req.session.userId),
-        isProvisionalWinner: Boolean(req.session.userId && listing.provisionalWinnerId?.toString() === req.session.userId)
+        isProvisionalWinner: Boolean(req.session.userId && listing.provisionalWinnerId?.toString() === req.session.userId),
+        hasProvisionalWinner: Boolean(listing.provisionalWinnerId)
       },
-      bidHistory: [...listing.bidHistory].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).map((bid) => ({
+      bidHistory: [...(listing.bidHistory ?? [])].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).map((bid) => ({
         id: bid.bidId.toString(),
         bidderAlias: bid.bidderAlias,
         amount: toRupees(bid.amountPaise),
@@ -420,11 +425,21 @@ export function createApp(services: AppServices = defaultServices) {
   app.post("/api/listings/:id/cancel", requireVerified, asyncRoute(async (req, res) => {
     const id = getRouteId(req);
     if (!Types.ObjectId.isValid(id)) return res.status(404).json({ error: "Auction not found." });
-    const existing = await Listing.findOne({ _id: id, sellerId: req.session.userId, biddingStatus: { $in: ["Open", "Scheduled"] } });
+    const now = services.now();
+    await closeExpiredAuctions(now, services.emitAuctionUpdate, id);
+    const eligible = {
+      _id: id,
+      sellerId: req.session.userId,
+      biddingStatus: { $in: ["Open", "Scheduled"] },
+      saleOutcome: "Pending seller decision",
+      closesAt: { $gt: now },
+      cancelledAt: null
+    };
+    const existing = await Listing.findOne(eligible);
     if (!existing) return res.status(409).json({ error: "Only your scheduled or open auction can be cancelled." });
     const listing = await Listing.findOneAndUpdate(
-      { _id: id, sellerId: req.session.userId, biddingStatus: { $in: ["Open", "Scheduled"] } },
-      { $set: { biddingStatus: "Cancelled", saleOutcome: "Cancelled", cancelledAt: services.now(), cancellationActorId: req.session.userId, updatedAt: services.now() } },
+      eligible,
+      { $set: { biddingStatus: "Cancelled", saleOutcome: "Cancelled", cancelledAt: now, cancellationActorId: req.session.userId, updatedAt: now } },
       { new: true }
     );
     if (!listing) return res.status(409).json({ error: "The auction is no longer eligible for cancellation." });
@@ -505,7 +520,9 @@ export function createApp(services: AppServices = defaultServices) {
     const input = z.object({ decision: z.enum(["approve", "reject"]) }).safeParse(req.body);
     if (!input.success || !Types.ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid seller decision." });
     try {
-      const result = await decideSale(id, new Types.ObjectId(req.session.userId), input.data.decision, services.now());
+      const now = services.now();
+      await closeExpiredAuctions(now, services.emitAuctionUpdate, id);
+      const result = await decideSale(id, new Types.ObjectId(req.session.userId), input.data.decision, now);
       services.emitAuctionUpdate(id);
       return res.json(result);
     } catch (error) {
@@ -586,7 +603,12 @@ export function createApp(services: AppServices = defaultServices) {
 
   app.use("/api", (_req, res) => res.status(404).json({ error: "API route not found." }));
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    if (error instanceof multer.MulterError) return res.status(400).json({ error: "Image upload failed.", details: error.code });
+    if (error instanceof multer.MulterError) {
+      const message = error.code === "LIMIT_FILE_SIZE"
+        ? "Images must be 5 MB or smaller."
+        : "Image upload failed. Choose one supported image at a time.";
+      return res.status(400).json({ error: message });
+    }
     if (config.NODE_ENV !== "production") console.error(error);
     return res.status(500).json({ error: "The request could not be completed." });
   });
@@ -598,7 +620,7 @@ function uploadMiddleware() {
   return multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 5 * 1024 * 1024, files: 1 },
-    fileFilter: (_req, file, callback) => callback(null, allowedPhotoTypes.has(file.mimetype))
+    fileFilter: (_req, _file, callback) => callback(null, true)
   });
 }
 

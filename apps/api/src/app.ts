@@ -134,6 +134,10 @@ function requireVerified(req: Request, res: Response, next: NextFunction) {
     .catch(next);
 }
 
+function isListingOwner(sellerId: Types.ObjectId, userId?: string): boolean {
+  return Boolean(userId && Types.ObjectId.isValid(userId) && sellerId.equals(new Types.ObjectId(userId)));
+}
+
 function getRouteId(req: Request): string {
   const value = req.params.id;
   return Array.isArray(value) ? value[0] ?? "" : value ?? "";
@@ -354,12 +358,21 @@ export function createApp(services: AppServices = defaultServices) {
       Listing.find(selector).sort(sort).skip((filters.page - 1) * filters.limit).limit(filters.limit).lean(),
       Listing.countDocuments(selector)
     ]);
-    return res.json({ items: results.map((item) => safeListing(item as never)), page: filters.page, limit: filters.limit, total, pages: Math.ceil(total / filters.limit) });
+    return res.json({
+      items: results.map((item) => ({
+        ...safeListing(item as never),
+        isSeller: isListingOwner(item.sellerId, req.session.userId)
+      })),
+      page: filters.page,
+      limit: filters.limit,
+      total,
+      pages: Math.ceil(total / filters.limit)
+    });
   }, services));
 
   app.get("/api/listings/mine", requireAuth, asyncRoute(async (req, res) => {
     const listings = await Listing.find({ sellerId: req.session.userId }).sort({ createdAt: -1 }).lean();
-    return res.json({ items: listings.map((item) => safeListing(item as never)) });
+    return res.json({ items: listings.map((item) => ({ ...safeListing(item as never), isSeller: true })) });
   }, services));
 
   app.post("/api/listings", requireVerified, asyncRoute(async (req, res) => {
@@ -389,7 +402,7 @@ export function createApp(services: AppServices = defaultServices) {
     const listing = await Listing.findById(id).lean();
     if (!listing) return res.status(404).json({ error: "Auction not found." });
     const seller = await User.findById(listing.sellerId).select("displayName").lean();
-    const isSeller = Boolean(req.session.userId && listing.sellerId.toString() === req.session.userId);
+    const isSeller = isListingOwner(listing.sellerId, req.session.userId);
     let provisionalWinner: { displayName: string; amount: number } | undefined;
     if (isSeller && listing.biddingStatus === "Closed" && listing.saleOutcome === "Pending seller decision" && listing.provisionalWinnerId) {
       const winningBid = getWinningBid(listing.bidHistory, listing.startingPricePaise);
@@ -482,20 +495,49 @@ export function createApp(services: AppServices = defaultServices) {
     const now = services.now();
     const listing = await Listing.findById(id);
     if (!listing) return res.status(404).json({ error: "Auction not found." });
-    if (listing.sellerId.toString() === req.session.userId) return res.status(403).json({ error: "You cannot bid on your own listing." });
+    if (isListingOwner(listing.sellerId, req.session.userId)) return res.status(403).json({ error: "You cannot bid on your own listing." });
     if (listing.biddingStatus === "Cancelled") return res.status(409).json({ error: "This auction was cancelled." });
     if (listing.biddingStatus !== "Open" || listing.closesAt <= now) return res.status(409).json({ error: "This auction is closed." });
     const amountPaise = toPaise(amountInput.data.amount);
     if (!Number.isSafeInteger(amountPaise) || amountPaise < 1) return res.status(400).json({ error: "Bid amount is invalid." });
     const minimumPaise = listing.leadingAmountPaise == null ? listing.startingPricePaise : listing.leadingAmountPaise + listing.minimumIncrementPaise;
     if (amountPaise < minimumPaise) {
+      const latest = await Listing.findById(listing._id)
+        .select("biddingStatus closesAt leadingAmountPaise startingPricePaise minimumIncrementPaise")
+        .lean();
+      if (!latest) return res.status(404).json({ error: "Auction not found." });
+      if (latest.biddingStatus === "Cancelled") return res.status(409).json({ error: "This auction was cancelled." });
+      if (latest.biddingStatus !== "Open" || latest.closesAt <= services.now()) {
+        return res.status(409).json({
+          error: "This auction has closed.",
+          currentHighestBid: toRupees(latest.leadingAmountPaise),
+          minimumNextBid: toRupees(latest.leadingAmountPaise == null
+            ? latest.startingPricePaise
+            : latest.leadingAmountPaise + latest.minimumIncrementPaise)
+        });
+      }
+      const latestMinimumPaise = latest.leadingAmountPaise == null
+        ? latest.startingPricePaise
+        : latest.leadingAmountPaise + latest.minimumIncrementPaise;
+      const currentHighestBid = toRupees(latest.leadingAmountPaise);
       return res.status(400).json({
-        error: listing.leadingAmountPaise == null ? "Bid is below the starting price." : "Bid is below the required minimum increment.",
-        minimumNextBid: toRupees(minimumPaise)
+        error: latest.leadingAmountPaise == null
+          ? `No bids have been placed. The first bid must be at least ₹${(latestMinimumPaise / 100).toFixed(2)}.`
+          : `Current highest bid is ₹${(latest.leadingAmountPaise / 100).toFixed(2)}; minimum next bid is ₹${(latestMinimumPaise / 100).toFixed(2)}.`,
+        currentHighestBid,
+        minimumNextBid: toRupees(latestMinimumPaise)
       });
     }
     const user = await User.findById(req.session.userId).select("displayName");
     if (!user) return res.status(401).json({ error: "Your session is no longer valid." });
+    const acceptedAt = services.now();
+    if (listing.closesAt <= acceptedAt) {
+      return res.status(409).json({
+        error: "This auction has closed.",
+        currentHighestBid: toRupees(listing.leadingAmountPaise),
+        minimumNextBid: toRupees(minimumPaise)
+      });
+    }
     const bidId = new Types.ObjectId();
     const bid = {
       bidId,
@@ -503,35 +545,59 @@ export function createApp(services: AppServices = defaultServices) {
       bidderAlias: user.displayName,
       amountPaise,
       type: "manual" as const,
-      createdAt: now
+      createdAt: acceptedAt
     };
     const update = await Listing.findOneAndUpdate(
       {
         _id: listing._id,
         biddingStatus: "Open",
-        closesAt: { $gt: now },
+        closesAt: { $gt: acceptedAt },
         leadingBidId: listing.leadingBidId,
         leadingAmountPaise: listing.leadingAmountPaise,
-        sellerId: { $ne: req.session.userId }
+        sellerId: { $ne: new Types.ObjectId(req.session.userId) }
       },
       {
         $set: {
           leadingBidId: bidId,
           leadingBidderId: req.session.userId,
           leadingAmountPaise: amountPaise,
-          updatedAt: now
+          updatedAt: acceptedAt
         },
         $push: { bidHistory: bid }
       },
       { new: true, runValidators: true }
     );
-    if (!update) return res.status(409).json({ error: "A bid or auction update happened first. Refresh the auction and try again." });
-    if (listing.leadingBidderId) {
+    if (!update) {
+      const latest = await Listing.findById(listing._id)
+        .select("biddingStatus closesAt leadingAmountPaise startingPricePaise minimumIncrementPaise")
+        .lean();
+      if (!latest) return res.status(404).json({ error: "Auction not found." });
+      const latestHighestBid = toRupees(latest.leadingAmountPaise);
+      const latestMinimumPaise = latest.leadingAmountPaise == null
+        ? latest.startingPricePaise
+        : latest.leadingAmountPaise + latest.minimumIncrementPaise;
+      if (latest.biddingStatus === "Cancelled") return res.status(409).json({ error: "This auction was cancelled." });
+      if (latest.biddingStatus !== "Open" || latest.closesAt <= services.now()) {
+        return res.status(409).json({
+          error: "This auction has closed. Bidding is no longer available.",
+          currentHighestBid: latestHighestBid,
+          minimumNextBid: toRupees(latestMinimumPaise)
+        });
+      }
+      return res.status(409).json({
+        error: latestHighestBid == null
+          ? `The auction changed before your bid was accepted. No bids have been placed; the first bid must be at least ₹${(latestMinimumPaise / 100).toFixed(2)}.`
+          : `A newer bid was accepted first. Current highest bid is ₹${latestHighestBid.toFixed(2)}; minimum next bid is ₹${(latestMinimumPaise / 100).toFixed(2)}.`,
+        currentHighestBid: latestHighestBid,
+        minimumNextBid: toRupees(latestMinimumPaise)
+      });
+    }
+    services.emitAuctionUpdate(listing.id);
+    if (listing.leadingBidderId && !listing.leadingBidderId.equals(new Types.ObjectId(req.session.userId))) {
       await makeNotification(listing.leadingBidderId, listing._id, "outbid", `You were outbid on ${listing.title}.`, `outbid:${listing._id}:${bidId}`);
     }
     await makeNotification(new Types.ObjectId(req.session.userId), listing._id, "bid_accepted", `Your bid on ${listing.title} was accepted.`, `bid:${listing._id}:${bidId}`);
-    services.emitAuctionUpdate(listing.id);
-    return res.status(201).json({ bid: { id: bidId.toString(), bidderAlias: user.displayName, amount: toRupees(amountPaise), type: "manual", createdAt: now }, listing: safeListing(update.toObject() as never) });
+    return res.status(201).json({ bid: { id: bidId.toString(), bidderAlias: user.displayName, amount: toRupees(amountPaise), type: "manual", createdAt: acceptedAt }, listing: safeListing(update.toObject() as never) });
   }, services));
 
   app.post("/api/listings/:id/decision", requireVerified, asyncRoute(async (req, res) => {

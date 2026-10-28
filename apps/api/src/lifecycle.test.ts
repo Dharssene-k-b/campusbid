@@ -14,9 +14,10 @@ const [{ createApp }, { closeExpiredAuctions }, models] = await Promise.all([
 ]);
 
 let now = new Date("2026-10-28T05:00:00.000Z");
+const emittedAuctionUpdates: string[] = [];
 const app = createApp({
   now: () => new Date(now),
-  emitAuctionUpdate: () => undefined
+  emitAuctionUpdate: (listingId) => emittedAuctionUpdates.push(listingId)
 });
 
 type Student = { agent: ReturnType<typeof supertest.agent>; displayName: string };
@@ -76,14 +77,25 @@ describe("CampusBid basic auction lifecycle", () => {
     const first = await createStudent("first@kongu.edu", "Junior One");
     const second = await createStudent("second@kongu.edu", "Junior Two");
     const listingId = (await createListing(seller, new Date(now.getTime() + 60_000)))._id;
+    emittedAuctionUpdates.length = 0;
+    const sellerExplore = await seller.agent.get("/api/listings");
+    const bidderExplore = await first.agent.get("/api/listings");
+    expect(sellerExplore.body.items.find((item: { _id: string }) => item._id === listingId).isSeller).toBe(true);
+    expect(bidderExplore.body.items.find((item: { _id: string }) => item._id === listingId).isSeller).toBe(false);
+    expect((await seller.agent.get(`/api/listings/${listingId}`)).body.listing.isSeller).toBe(true);
+    expect((await first.agent.get(`/api/listings/${listingId}`)).body.listing.isSeller).toBe(false);
     const storedListing = await seller.agent.get(`/api/listings/${listingId}`);
     expect(storedListing.body.listing.photos[0]).toMatch(/^\/api\/uploads\/[a-f0-9]+\.png$/);
     const storedImage = await seller.agent.get(storedListing.body.listing.photos[0] as string);
     expect(storedImage.status).toBe(200);
     expect(storedImage.headers["content-type"]).toContain("image/png");
 
-    expect((await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 199 })).status).toBe(400);
+    const belowStartingPrice = await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 199 });
+    expect(belowStartingPrice.status).toBe(400);
+    expect(belowStartingPrice.body).toMatchObject({ currentHighestBid: null, minimumNextBid: 200 });
+    expect(belowStartingPrice.body.error).toContain("The first bid must be at least ₹200.00.");
     expect((await seller.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 200 })).status).toBe(403);
+    expect(emittedAuctionUpdates).toHaveLength(0);
     expect((await first.agent.get("/api/listings?q=calculator&category=Calculators&condition=Good&minPrice=190&maxPrice=210")).body.items).toHaveLength(1);
     expect((await first.agent.get("/api/listings?closingSoon=true&sort=ending")).body.items).toHaveLength(1);
     expect((await first.agent.get("/api/listings?page=1&limit=1")).body.page).toBe(1);
@@ -91,8 +103,19 @@ describe("CampusBid basic auction lifecycle", () => {
 
     const firstBid = await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 200 });
     expect(firstBid.status).toBe(201);
-    expect((await second.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 220 })).status).toBe(201);
-    expect((await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 225 })).status).toBe(400);
+    expect(emittedAuctionUpdates[emittedAuctionUpdates.length - 1]).toBe(listingId);
+    const secondBid = await second.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 220 });
+    expect(secondBid.status).toBe(201);
+    for (const bidder of [first, second, seller]) {
+      const current = await bidder.agent.get(`/api/listings/${listingId}`);
+      expect(current.body.listing).toMatchObject({ leadingAmount: 220, minimumNextBid: 240 });
+    }
+    const updatesBeforeLowBid = emittedAuctionUpdates.length;
+    const tooLow = await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 225 });
+    expect(tooLow.status).toBe(400);
+    expect(tooLow.body).toMatchObject({ currentHighestBid: 220, minimumNextBid: 240 });
+    expect(tooLow.body.error).toContain("Current highest bid is ₹220.00; minimum next bid is ₹240.00.");
+    expect(emittedAuctionUpdates).toHaveLength(updatesBeforeLowBid);
     expect((await seller.agent.patch(`/api/listings/${listingId}`).send({ title: "Changed after bid" })).status).toBe(409);
     const notificationsAfterOutbid = (await first.agent.get("/api/notifications")).body.items;
     expect(notificationsAfterOutbid.some((item: { type: string }) => item.type === "outbid")).toBe(true);
@@ -106,6 +129,14 @@ describe("CampusBid basic auction lifecycle", () => {
     ]);
     expect(competing.filter((response) => response.status === 201)).toHaveLength(1);
     expect(competing.filter((response) => [400, 409].includes(response.status))).toHaveLength(1);
+    const rejectedCompetingBid = competing.find((response) => response.status !== 201);
+    expect(rejectedCompetingBid?.body.currentHighestBid).toBe(240);
+    expect(rejectedCompetingBid?.body.minimumNextBid).toBe(260);
+    expect(rejectedCompetingBid?.body.error).toContain("Current highest bid is ₹240.00; minimum next bid is ₹260.00.");
+
+    const sellerListings = await seller.agent.get("/api/listings/mine");
+    const sellerCard = sellerListings.body.items.find((item: { _id: string }) => item._id === listingId);
+    expect(sellerCard).toMatchObject({ leadingAmount: 240, minimumNextBid: 260 });
 
     const details = await first.agent.get(`/api/listings/${listingId}`);
     expect(details.body.bidHistory).toHaveLength(3);

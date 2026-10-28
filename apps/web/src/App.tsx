@@ -33,6 +33,25 @@ function useToast() {
   return useContext(ToastContext);
 }
 
+function useAuctionUpdates(listingIds: string[], enabled: boolean, onUpdate: (listingId: string) => void) {
+  const idsKey = listingIds.join(",");
+  const onUpdateRef = useRef(onUpdate);
+  onUpdateRef.current = onUpdate;
+
+  useEffect(() => {
+    if (!enabled || !idsKey) return;
+    const subscribedIds = new Set(idsKey.split(","));
+    const socket = io({ withCredentials: true, reconnection: true });
+    socket.on("connect", () => {
+      for (const listingId of subscribedIds) socket.emit("auction:subscribe", listingId);
+    });
+    socket.on("auction:updated", (event: { listingId?: string }) => {
+      if (event.listingId && subscribedIds.has(event.listingId)) onUpdateRef.current(event.listingId);
+    });
+    return () => { socket.disconnect(); };
+  }, [enabled, idsKey]);
+}
+
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -182,6 +201,7 @@ function Marketplace() {
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
   const [total, setTotal] = useState(0);
+  const reloadSequence = useRef(0);
   const query = search.get("q") ?? "";
   const category = search.get("category") ?? "";
   const condition = search.get("condition") ?? "";
@@ -191,50 +211,39 @@ function Marketplace() {
   const closingSoon = search.get("closingSoon") === "true";
   const filterKey = search.toString();
   const reload = useCallback(async (targetPage = 1, showLoading = true) => {
+    const requestId = ++reloadSequence.current;
     if (showLoading) setLoading(true);
     setError("");
     const parameters = new URLSearchParams(filterKey);
     parameters.set("page", String(targetPage));
     try {
       const result = await api<{ items: Listing[]; total: number; pages: number }>(`/listings?${parameters.toString()}`);
+      if (requestId !== reloadSequence.current) return;
       setItems(result.items);
       setTotal(result.total);
       setPages(Math.max(result.pages, 1));
       setPage(targetPage);
     } catch (failure) {
-      setError(messageOf(failure));
+      if (requestId === reloadSequence.current) setError(messageOf(failure));
     } finally {
-      if (showLoading) setLoading(false);
+      if (requestId === reloadSequence.current) setLoading(false);
     }
   }, [filterKey]);
   useEffect(() => { void reload(); }, [reload]);
-  const visibleListingIds = items.map((item) => item._id).join(",");
+  const refreshFromAuctionUpdate = useCallback(() => { void reload(page, false); }, [page, reload]);
+  useAuctionUpdates(items.map((item) => item._id), isAuthenticated, refreshFromAuctionUpdate);
   useEffect(() => {
-    if (!visibleListingIds) return;
-    if (!isAuthenticated) {
-      const refresh = () => {
-        if (!document.hidden) void reload(page, false);
-      };
-      const timer = window.setInterval(refresh, 15_000);
-      document.addEventListener("visibilitychange", refresh);
-      return () => {
-        window.clearInterval(timer);
-        document.removeEventListener("visibilitychange", refresh);
-      };
-    }
-
-    const listingIds = new Set(visibleListingIds.split(","));
-    const socket = io({ withCredentials: true, reconnection: true });
-    socket.on("connect", () => {
-      for (const listingId of listingIds) {
-        socket.emit("auction:subscribe", listingId);
-      }
-    });
-    socket.on("auction:updated", (event: { listingId?: string }) => {
-      if (event.listingId && listingIds.has(event.listingId)) void reload(page, false);
-    });
-    return () => { socket.disconnect(); };
-  }, [isAuthenticated, page, reload, visibleListingIds]);
+    if (isAuthenticated || items.length === 0) return;
+    const refresh = () => {
+      if (!document.hidden) void reload(page, false);
+    };
+    const timer = window.setInterval(refresh, 15_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [isAuthenticated, items.length, page, reload]);
   const refreshExpiredListing = useCallback(async (listingId: string) => {
     try {
       await api(`/listings/${listingId}`);
@@ -343,6 +352,7 @@ function ListingCard({ item, onExpired }: { item: Listing; onExpired: (listingId
         <div className="relative aspect-[1.45] overflow-hidden bg-[#e8ece4]">
           {item.photos[0] ? <ListingImage src={item.photos[0]} alt={item.title} category={item.category} className="h-full w-full transition duration-500 group-hover:scale-[1.03]" /> : <PhotoPlaceholder category={item.category} />}
           <span className="absolute left-4 top-4 rounded-full bg-white/90 px-3 py-1 text-xs font-semibold text-forest">{item.category}</span>
+          {item.isSeller && <span className="absolute right-4 top-4 rounded-full bg-white/90 px-3 py-1 text-xs font-semibold text-forest">Your listing</span>}
           <span className="absolute bottom-4 right-4 rounded-full bg-ink/85 px-3 py-1.5 font-mono text-xs font-medium text-white" aria-label={`Time remaining: ${timer.text}`}>◷ {timer.text}</span>
         </div>
         <div className="p-5">
@@ -351,7 +361,11 @@ function ListingCard({ item, onExpired }: { item: Listing; onExpired: (listingId
             <span className="shrink-0 rounded-full bg-canvas px-2.5 py-1 text-[11px] font-medium text-ink/65">{item.condition}</span>
           </div>
           <div className="mt-4 flex items-end justify-between border-t border-line pt-4">
-            <div><p className="text-xs text-ink/50">{item.leadingAmount == null ? "Starting bid" : "Leading bid"}</p><p className="mt-1 text-xl font-bold text-forest">{formatRupees(item.leadingAmount ?? item.startingPrice)}</p></div>
+            <div>
+              <p className="text-xs text-ink/50">{item.leadingAmount == null ? "Starting price · no bids yet" : "Current highest bid"}</p>
+              <p className="mt-1 text-xl font-bold text-forest">{formatRupees(item.leadingAmount ?? item.startingPrice)}</p>
+              <p className="mt-1 text-xs text-ink/55">Minimum next bid: {formatRupees(item.minimumNextBid)}</p>
+            </div>
             <span className="text-sm font-semibold text-forest">View auction <span aria-hidden="true">↗</span></span>
           </div>
         </div>
@@ -424,6 +438,17 @@ function categorySymbol(category: string): string {
   return symbols[category] ?? "✦";
 }
 
+function statusLabel(item: Listing): string {
+  if (item.biddingStatus === "Cancelled") return "Cancelled";
+  if (item.saleOutcome === "Awaiting handover") return "Reserved";
+  if (item.saleOutcome === "Completed") return "Completed";
+  if (item.saleOutcome === "Rejected") return "Rejected";
+  if (item.saleOutcome === "Unsold") return "Unsold";
+  if (item.biddingStatus === "Closed" && item.saleOutcome === "Pending seller decision") return "Awaiting seller approval";
+  if (item.biddingStatus === "Open") return "Active";
+  return item.biddingStatus;
+}
+
 function ListingSkeleton() {
   return <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3" aria-label="Loading auctions">
     {[0, 1, 2].map((item) => <div key={item} className="overflow-hidden rounded-[26px] border border-line bg-white"><div className="skeleton aspect-[1.45]" /><div className="space-y-3 p-5"><div className="skeleton h-5 w-3/4 rounded" /><div className="skeleton h-4 w-1/2 rounded" /><div className="skeleton mt-4 h-10 rounded" /></div></div>)}
@@ -439,41 +464,38 @@ function ListingDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [bid, setBid] = useState("");
+  const loadSequence = useRef(0);
   const [handover, setHandover] = useState<{ sellerConfirmedAt: string | null; buyerConfirmedAt: string | null; failedPickupAt: string | null } | null>(null);
   const [canceling, setCanceling] = useState(false);
   const [decisionInProgress, setDecisionInProgress] = useState(false);
   const load = useCallback(async () => {
+    const requestId = ++loadSequence.current;
     setError("");
     try {
       const response = await api<{ listing: Listing; bidHistory: Listing["bidHistory"] }>(`/listings/${id}`);
+      if (requestId !== loadSequence.current) return;
       setItem({ ...response.listing, bidHistory: response.bidHistory });
     } catch (failure) {
-      setError(messageOf(failure));
+      if (requestId === loadSequence.current) setError(messageOf(failure));
     } finally {
-      setLoading(false);
+      if (requestId === loadSequence.current) setLoading(false);
     }
   }, [id]);
   useEffect(() => { void load();   }, [id, load]);
   const timer = useLiveCountdown(item?.closesAt, () => { void load(); });
+  const refreshListingFromSocket = useCallback(() => { void load(); }, [load]);
+  useAuctionUpdates(id ? [id] : [], isAuthenticated, refreshListingFromSocket);
   useEffect(() => {
-    if (!id) return;
-    if (!isAuthenticated) {
-      const refresh = () => {
-        if (!document.hidden) void load();
-      };
-      const interval = window.setInterval(refresh, 15_000);
-      document.addEventListener("visibilitychange", refresh);
-      return () => {
-        window.clearInterval(interval);
-        document.removeEventListener("visibilitychange", refresh);
-      };
-    }
-    const socket = io({ withCredentials: true, reconnection: true });
-    socket.on("connect", () => socket.emit("auction:subscribe", id, () => void load()));
-    socket.on("auction:updated", (event: { listingId?: string }) => {
-      if (event.listingId === id) void load();
-    });
-    return () => { socket.disconnect(); };
+    if (isAuthenticated || !id) return;
+    const refresh = () => {
+      if (!document.hidden) void load();
+    };
+    const interval = window.setInterval(refresh, 15_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refresh);
+    };
   }, [id, isAuthenticated, load]);
   useEffect(() => {
     if (item?.saleOutcome === "Awaiting handover" && isAuthenticated) {
@@ -568,14 +590,21 @@ function ListingDetail() {
 
         <aside className="sticky top-24 rounded-[30px] border border-line bg-white p-6 shadow-card md:p-8">
           <div className="flex items-center justify-between gap-3">
-            <Badge tone={isOpen ? "green" : "neutral"}>{item.biddingStatus}</Badge>
+            <Badge tone={isOpen ? "green" : "neutral"}>{statusLabel(item)}</Badge>
             <span className="text-sm text-ink/55">{item.condition}</span>
           </div>
           <h1 className="mt-4 font-display text-3xl leading-tight md:text-4xl">{item.title}</h1>
           <p className="mt-2 text-sm text-ink/55">Listed by {item.sellerDisplayName ?? "Campus student"}</p>
           <div className="mt-7 rounded-2xl bg-canvas p-5">
-            <p className="text-xs font-semibold uppercase tracking-wider text-ink/50">{item.leadingAmount == null ? "Starting price" : "Current leading bid"}</p>
+            <p className="text-xs font-semibold uppercase tracking-wider text-ink/50">{item.leadingAmount == null ? "Starting price · no bids yet" : "Current highest bid"}</p>
             <p className="mt-1 text-4xl font-black tracking-tight text-forest">{formatRupees(item.leadingAmount ?? item.startingPrice)}</p>
+            {canReviewWinningBid && item.provisionalWinner && <div className="mt-3 rounded-xl border border-sun/40 bg-sun/10 p-3">
+              <p className="text-sm text-ink/70">Provisional winner: <strong>{item.provisionalWinner.displayName}</strong></p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button className="button-primary !py-2" disabled={decisionInProgress} onClick={() => void decide("approve")}>{decisionInProgress ? "Saving…" : "Approve"}</button>
+                <button className="button-outline !py-2" disabled={decisionInProgress} onClick={() => void decide("reject")}>{decisionInProgress ? "Saving…" : "Reject"}</button>
+              </div>
+            </div>}
             <div className="mt-4 grid grid-cols-2 gap-3 border-t border-line pt-4 text-sm">
               <div><p className="text-xs text-ink/50">Minimum next bid</p><p className="mt-1 font-bold">{formatRupees(item.minimumNextBid)}</p></div>
               <div><p className="text-xs text-ink/50">Min. increment</p><p className="mt-1 font-bold">{formatRupees(item.minimumIncrement)}</p></div>
@@ -594,14 +623,7 @@ function ListingDetail() {
           {isSeller && isOpen && <p className="mt-4 rounded-xl bg-canvas p-3 text-sm text-ink/60">Bidding is open. The current leading bid and minimum next bid are shown above.</p>}
           {isSeller && (canEdit || canCancel) && <div className="mt-5 flex gap-2">{canEdit && item.bidHistory.length === 0 && <Link className="button-outline flex-1" to={`/listings/${id}/edit`}>Edit listing</Link>}{canCancel && <button className="button-outline flex-1" disabled={canceling} onClick={() => void cancel()}>{canceling ? "Cancelling…" : "Cancel auction"}</button>}</div>}
           {isSeller && item.bidHistory.length > 0 && <p className="mt-4 text-xs text-ink/50">Listing edits are locked after the first accepted bid. You may still cancel the auction; bid history is preserved.</p>}
-          {canReviewWinningBid && item.provisionalWinner && <div className="mt-5 rounded-2xl border border-sun/40 bg-sun/10 p-4">
-            <p className="font-semibold">Review the provisional winner</p>
-            <p className="mt-2 text-sm text-ink/70">Winning bid: <strong>{formatRupees(item.provisionalWinner.amount)}</strong></p>
-            <p className="mt-1 text-sm text-ink/70">Winning bidder: <strong>{item.provisionalWinner.displayName}</strong></p>
-            <p className="mt-2 text-sm text-ink/60">Approve to reserve the item, or reject the winning bid.</p>
-            <div className="mt-4 flex gap-2"><button className="button-primary flex-1" disabled={decisionInProgress} onClick={() => void decide("approve")}>{decisionInProgress ? "Saving…" : "Approve Winning Bid"}</button><button className="button-outline flex-1" disabled={decisionInProgress} onClick={() => void decide("reject")}>{decisionInProgress ? "Saving…" : "Reject Winning Bid"}</button></div>
-          </div>}
-          {item.saleOutcome === "Pending seller decision" && !isSeller && <p className="mt-4 rounded-xl bg-canvas p-3 text-sm text-ink/60">This auction has closed. The seller is reviewing the leading bid.</p>}
+          {item.biddingStatus === "Closed" && item.saleOutcome === "Pending seller decision" && !isSeller && <p className="mt-4 rounded-xl bg-canvas p-3 text-sm text-ink/60">This auction has closed. The seller is reviewing the leading bid.</p>}
           {item.saleOutcome === "Awaiting handover" && user && (isSeller || isWinner) && <div className="mt-5 rounded-2xl bg-mint p-4">
             <p className="font-semibold text-forest">Reserved · campus handover</p>
             <p className="mt-1 text-sm text-forest/75">Both buyer and seller confirm after meeting. Sale completes once both parties confirm.</p>
@@ -1009,20 +1031,26 @@ function DashboardTile({ icon, title, text, to }: { icon: string; title: string;
 }
 
 function MyListings() {
+  const { user } = useAuth();
   const [items, setItems] = useState<Listing[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const reloadSequence = useRef(0);
   const reload = useCallback(async () => {
+    const requestId = ++reloadSequence.current;
     try {
       const result = await api<{ items: Listing[] }>("/listings/mine");
+      if (requestId !== reloadSequence.current) return;
       setItems(result.items);
     } catch (failure) {
-      setError(messageOf(failure));
+      if (requestId === reloadSequence.current) setError(messageOf(failure));
     } finally {
-      setLoading(false);
+      if (requestId === reloadSequence.current) setLoading(false);
     }
   }, []);
   useEffect(() => { void reload(); }, [reload]);
+  const refreshMyListingsFromSocket = useCallback(() => { void reload(); }, [reload]);
+  useAuctionUpdates(items.map((item) => item._id), Boolean(user), refreshMyListingsFromSocket);
   return <div className="page-shell py-10 md:py-14">
     <div className="flex items-end justify-between gap-4"><div><p className="section-kicker">Seller workspace</p><h1 className="mt-2 font-display text-4xl">My listings</h1></div><Link to="/listings/new" className="button-primary">＋ New auction</Link></div>
     {error && <ErrorBanner message={error} />}

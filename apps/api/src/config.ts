@@ -19,7 +19,7 @@ const schema = z.object({
   CLOUDINARY_API_SECRET: z.string().optional(),
   COOKIE_SECURE: z.enum(["true", "false"]).default("false"),
   COOKIE_SAME_SITE: z.enum(["lax", "strict", "none"]).default("lax"),
-  AUCTION_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(5000).default(30000)
+  AUCTION_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(5000).default(5000)
 });
 
 const parsed = schema.safeParse(process.env);

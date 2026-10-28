@@ -202,6 +202,23 @@ describe("CampusBid auction status actions", () => {
     expect(await screen.findByRole("img", { name: "Campus calculator: photo unavailable" })).toBeInTheDocument();
   });
 
+  it("keeps a successfully loaded cached image visible after mounting", async () => {
+    vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockReturnValue(true);
+    vi.spyOn(HTMLImageElement.prototype, "naturalWidth", "get").mockReturnValue(318);
+    const auction = listing({ photos: ["/uploads/photo.png"] });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/auth/me")) return Response.json({ user: null });
+      if (url.includes("/listings?")) return Response.json({ items: [auction], total: 1, pages: 1 });
+      return Response.json({ error: "Unexpected request." }, { status: 404 });
+    });
+    render(<MemoryRouter><App /></MemoryRouter>);
+
+    const image = await screen.findByRole("img", { name: "Campus calculator" });
+    await waitFor(() => expect(image.className).toContain("opacity-100"));
+    expect(screen.queryByLabelText("Loading image")).not.toBeInTheDocument();
+  });
+
   it("recalculates the countdown on focus and refreshes the auction when it expires", async () => {
     let currentTime = Date.now();
     vi.spyOn(Date, "now").mockImplementation(() => currentTime);

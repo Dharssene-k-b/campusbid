@@ -347,14 +347,20 @@ function imageSource(src: string): string {
 function ListingImage({ src, alt, className, category }: { src: string; alt: string; className: string; category: string }) {
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
+  const imageRef = useRef<HTMLImageElement>(null);
   useEffect(() => {
     setLoaded(false);
     setFailed(false);
+    const image = imageRef.current;
+    if (image?.complete) {
+      if (image.naturalWidth > 0) setLoaded(true);
+      else setFailed(true);
+    }
   }, [src]);
   if (failed) return <div className={`${className} flex items-center justify-center bg-gradient-to-br from-mint to-[#f0dfc9]`} role="img" aria-label={`${alt}: photo unavailable`}><div className="text-center"><span className="block text-5xl" aria-hidden="true">{categorySymbol(category)}</span><span className="mt-2 block text-sm text-ink/60">Photo unavailable</span></div></div>;
   return <div className="relative h-full w-full">
     {!loaded && <div className="skeleton absolute inset-0" aria-label="Loading image" />}
-    <img src={imageSource(src)} alt={alt} onLoad={() => setLoaded(true)} onError={() => setFailed(true)} className={`${className} ${loaded ? "opacity-100" : "opacity-0"} object-cover`} />
+    <img ref={imageRef} src={imageSource(src)} alt={alt} onLoad={() => setLoaded(true)} onError={() => setFailed(true)} className={`${className} ${loaded ? "opacity-100" : "opacity-0"} object-cover`} />
   </div>;
 }
 

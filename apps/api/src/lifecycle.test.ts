@@ -76,6 +76,11 @@ describe("CampusBid basic auction lifecycle", () => {
     const first = await createStudent("first@kongu.edu", "Junior One");
     const second = await createStudent("second@kongu.edu", "Junior Two");
     const listingId = (await createListing(seller, new Date(now.getTime() + 60_000)))._id;
+    const storedListing = await seller.agent.get(`/api/listings/${listingId}`);
+    expect(storedListing.body.listing.photos[0]).toMatch(/^\/api\/uploads\/[a-f0-9]+\.png$/);
+    const storedImage = await seller.agent.get(storedListing.body.listing.photos[0] as string);
+    expect(storedImage.status).toBe(200);
+    expect(storedImage.headers["content-type"]).toContain("image/png");
 
     expect((await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 199 })).status).toBe(400);
     expect((await seller.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 200 })).status).toBe(403);

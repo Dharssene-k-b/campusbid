@@ -77,12 +77,18 @@ describe("CampusBid basic auction lifecycle", () => {
     expect((await first.agent.get("/api/listings?q=calculator&category=Calculators&condition=Good&minPrice=190&maxPrice=210")).body.items).toHaveLength(1);
     expect((await first.agent.get("/api/listings?closingSoon=true&sort=ending")).body.items).toHaveLength(1);
     expect((await first.agent.get("/api/listings?page=1&limit=1")).body.page).toBe(1);
+    expect((await seller.agent.patch(`/api/listings/${listingId}`).send({ description: "Tested, working scientific calculator, with cover." })).status).toBe(200);
 
     const firstBid = await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 200 });
     expect(firstBid.status).toBe(201);
-    const secondBid = await second.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 220 });
-    expect(secondBid.status).toBe(201);
+    expect((await second.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 220 })).status).toBe(201);
     expect((await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 225 })).status).toBe(400);
+    expect((await seller.agent.patch(`/api/listings/${listingId}`).send({ title: "Changed after bid" })).status).toBe(409);
+    const notificationsAfterOutbid = (await first.agent.get("/api/notifications")).body.items;
+    expect(notificationsAfterOutbid.some((item: { type: string }) => item.type === "outbid")).toBe(true);
+    const separateListingId = (await createListing(seller, new Date(now.getTime() + 5 * 60_000), "Above-start calculator"))._id;
+    expect((await first.agent.post(`/api/listings/${separateListingId}/bids`).send({ amount: 250 })).status).toBe(201);
+    expect((await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 239 })).status).toBe(400);
 
     const competing = await Promise.all([
       first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 240 }),
@@ -95,7 +101,7 @@ describe("CampusBid basic auction lifecycle", () => {
     expect(details.body.bidHistory).toHaveLength(3);
     expect(details.body.bidHistory[0].bidderAlias).toBeTruthy();
     expect(details.body.bidHistory[0].bidderAlias).not.toContain("@");
-    const priceFiltered = await first.agent.get("/api/listings?category=Calculators&minPrice=230&maxPrice=300");
+    const priceFiltered = await first.agent.get("/api/listings?category=Calculators&minPrice=230&maxPrice=245");
     expect(priceFiltered.body.items).toHaveLength(1);
 
     now = new Date(now.getTime() + 61_000);

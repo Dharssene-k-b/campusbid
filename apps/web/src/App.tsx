@@ -442,7 +442,8 @@ function ListingDetail() {
             <p className="mt-2 text-xs text-ink/50">Bids are binding. The server verifies the minimum and closing time.</p>
           </form>}
           {isOpen && !user && <Link className="button-primary mt-5 w-full" to="/login">Log in to place a bid</Link>}
-          {isSeller && <div className="mt-5 flex gap-2"><Link className="button-outline flex-1" to={`/listings/${id}/edit`}>Edit listing</Link><button className="button-outline flex-1" onClick={() => void cancelListing(id, toast, load)}>Cancel auction</button></div>}
+          {isSeller && <div className="mt-5 flex gap-2">{item.bidHistory.length === 0 && <Link className="button-outline flex-1" to={`/listings/${id}/edit`}>Edit listing</Link>}<button className="button-outline flex-1" onClick={() => void cancelListing(id, toast, load)}>Cancel auction</button></div>}
+          {isSeller && item.bidHistory.length > 0 && <p className="mt-4 text-xs text-ink/50">Listing edits are locked after the first accepted bid. You may still cancel the auction; bid history is preserved.</p>}
           {isSeller && item.saleOutcome === "Pending seller decision" && <div className="mt-5 rounded-2xl border border-sun/40 bg-[#fff9f0] p-4">
             <p className="font-semibold">Review the provisional winner</p><p className="mt-1 text-sm text-ink/60">Approve to reserve the item, or reject the winning bid.</p>
             <div className="mt-4 flex gap-2"><button className="button-primary flex-1" onClick={() => void decide("approve")}>Approve bid</button><button className="button-outline flex-1" onClick={() => void decide("reject")}>Reject</button></div>

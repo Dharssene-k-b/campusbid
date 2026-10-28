@@ -22,7 +22,7 @@ The first bid is at least the starting amount. Subsequent ordinary bids are at l
 
 ## Listing edits
 
-Before any accepted bid, an owner may edit validated listing details. Once a bid exists, edits to starting price, minimum increment, or other auction-defining terms are prohibited; non-material description/photo edits may be allowed only if they cannot misrepresent the item. A cancelled listing is never deleted to erase history.
+Before any accepted bid, an owner may edit validated listing details. Once a bid exists, all listing edits are locked to avoid changing the auction terms or item representation after students have relied on them. The owner may cancel the auction; cancellation is recorded and preserves the bid history.
 
 ## Identity and privacy
 

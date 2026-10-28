@@ -75,6 +75,7 @@ describe("CampusBid basic auction lifecycle", () => {
     expect((await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 199 })).status).toBe(400);
     expect((await seller.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 200 })).status).toBe(403);
     expect((await first.agent.get("/api/listings?q=calculator&category=Calculators&condition=Good&minPrice=190&maxPrice=210")).body.items).toHaveLength(1);
+    expect((await first.agent.get("/api/listings?closingSoon=true&sort=ending")).body.items).toHaveLength(1);
     expect((await first.agent.get("/api/listings?page=1&limit=1")).body.page).toBe(1);
 
     const firstBid = await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 200 });
@@ -94,6 +95,8 @@ describe("CampusBid basic auction lifecycle", () => {
     expect(details.body.bidHistory).toHaveLength(3);
     expect(details.body.bidHistory[0].bidderAlias).toBeTruthy();
     expect(details.body.bidHistory[0].bidderAlias).not.toContain("@");
+    const priceFiltered = await first.agent.get("/api/listings?category=Calculators&minPrice=230&maxPrice=300");
+    expect(priceFiltered.body.items).toHaveLength(1);
 
     now = new Date(now.getTime() + 61_000);
     expect((await first.agent.post(`/api/listings/${listingId}/bids`).send({ amount: 500 })).status).toBe(409);
@@ -111,6 +114,7 @@ describe("CampusBid basic auction lifecycle", () => {
     expect((await seller.agent.post(`/api/listings/${listingId}/handover/confirm`)).status).toBe(200);
     expect((await winner.agent.post(`/api/listings/${listingId}/handover/confirm`)).body.complete).toBe(true);
     expect((await winner.agent.post(`/api/listings/${listingId}/handover/confirm`)).status).toBe(409);
+    expect((await winner.agent.post(`/api/listings/${listingId}/handover/failed-pickup`)).status).toBe(409);
     expect((await seller.agent.get(`/api/listings/${listingId}`)).body.listing.saleOutcome).toBe("Completed");
 
     expect((await seller.agent.get("/api/notifications")).body.items.length).toBeGreaterThan(0);
@@ -155,9 +159,13 @@ describe("CampusBid basic auction lifecycle", () => {
     const failedId = (await createListing(seller, new Date(now.getTime() + 30_000), "Pickup calculator"))._id;
     expect((await buyer.agent.post(`/api/listings/${rejectedId}/bids`).send({ amount: 200 })).status).toBe(201);
     expect((await buyer.agent.post(`/api/listings/${failedId}/bids`).send({ amount: 200 })).status).toBe(201);
-    now = new Date(now.getTime() + 31_000);
-    expect(await closeExpiredAuctions(now)).toBe(3);
+    now = new Date(now.getTime() + 15_000);
+    expect(await closeExpiredAuctions(now)).toBe(1);
     expect((await seller.agent.get(`/api/listings/${noBidId}`)).body.listing.saleOutcome).toBe("Unsold");
+    expect((await seller.agent.get(`/api/listings/${rejectedId}`)).body.listing.biddingStatus).toBe("Open");
+    now = new Date(now.getTime() + 16_000);
+    expect(await closeExpiredAuctions(now)).toBe(2);
+    expect(await closeExpiredAuctions(now)).toBe(0);
     expect((await seller.agent.post(`/api/listings/${rejectedId}/decision`).send({ decision: "reject" })).status).toBe(200);
     expect((await seller.agent.get(`/api/listings/${rejectedId}`)).body.listing.saleOutcome).toBe("Rejected");
     expect((await buyer.agent.post(`/api/listings/${failedId}/decision`).send({ decision: "approve" })).status).toBe(409);
@@ -168,6 +176,8 @@ describe("CampusBid basic auction lifecycle", () => {
 
   it("rejects invalid photo references and invalid combined price ranges", async () => {
     const seller = await createStudent("seller-four@campus.test", "Book Seller");
+    const invalidUpload = await seller.agent.post("/api/uploads").attach("photo", Buffer.from("this is not an image"), { filename: "image.png", contentType: "image/png" });
+    expect(invalidUpload.status).toBe(400);
     const invalid = await seller.agent.post("/api/listings").send({
       title: "Campus textbook",
       category: "Books",
@@ -181,5 +191,21 @@ describe("CampusBid basic auction lifecycle", () => {
     expect(invalid.status).toBe(400);
     const filters = await supertest(app).get("/api/listings?minPrice=500&maxPrice=100");
     expect(filters.status).toBe(400);
+  });
+
+  it("expires verification links and issues a fresh development link on resend", async () => {
+    const agent = supertest.agent(app);
+    const registered = await agent.post("/api/auth/register").send({
+      email: "expired@campus.test",
+      password: "campusbid-test-password",
+      displayName: "Expired Link"
+    });
+    expect(registered.status).toBe(201);
+    now = new Date(now.getTime() + 24 * 60 * 60 * 1000 + 1);
+    expect((await agent.post("/api/auth/verify").send({ token: registered.body.developmentVerificationToken })).status).toBe(400);
+    const resent = await agent.post("/api/auth/resend-verification").send({ email: "expired@campus.test" });
+    expect(resent.status).toBe(200);
+    expect(resent.body.developmentVerificationToken).toBeTruthy();
+    expect((await agent.post("/api/auth/verify").send({ token: resent.body.developmentVerificationToken })).status).toBe(200);
   });
 });

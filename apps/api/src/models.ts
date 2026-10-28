@@ -9,6 +9,7 @@ export interface UserRecord {
   displayName: string;
   verifiedAt: Date | null;
   verificationTokenHash?: string;
+  verificationExpiresAt?: Date | null;
   accountStatus: "active" | "disabled";
   createdAt?: Date;
   updatedAt?: Date;
@@ -77,6 +78,7 @@ const userSchema = new Schema<UserRecord>({
   displayName: { type: String, required: true, trim: true, maxlength: 60 },
   verifiedAt: { type: Date, default: null },
   verificationTokenHash: { type: String, select: false },
+  verificationExpiresAt: { type: Date, default: null, select: false },
   accountStatus: { type: String, enum: ["active", "disabled"], default: "active" }
 }, { timestamps: true });
 

@@ -9,7 +9,9 @@ import cors from "cors";
 import helmet from "helmet";
 import multer from "multer";
 import { rateLimit } from "express-rate-limit";
-import { fileTypeFromFile } from "file-type";
+import { fileTypeFromBuffer } from "file-type";
+import nodemailer from "nodemailer";
+import { v2 as cloudinary } from "cloudinary";
 import { Types } from "mongoose";
 import { z } from "zod";
 import { config } from "./config.js";
@@ -24,6 +26,14 @@ declare module "express-session" {
 
 const uploadsDirectory = path.resolve(process.cwd(), "uploads");
 const allowedPhotoTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+if (config.IMAGE_STORAGE_PROVIDER === "cloudinary") {
+  cloudinary.config({
+    cloud_name: config.CLOUDINARY_CLOUD_NAME,
+    api_key: config.CLOUDINARY_API_KEY,
+    api_secret: config.CLOUDINARY_API_SECRET,
+    secure: true
+  });
+}
 const sessionMiddleware = session({
   name: "campusbid.sid",
   secret: config.SESSION_SECRET,
@@ -44,6 +54,26 @@ export type AppServices = {
 };
 
 const defaultServices: AppServices = { now: () => new Date(), emitAuctionUpdate: () => undefined };
+
+async function deliverVerificationEmail(email: string, token: string): Promise<void> {
+  if (config.EMAIL_PROVIDER === "development") return;
+  const transporter = nodemailer.createTransport({
+    host: config.SMTP_HOST,
+    port: config.SMTP_PORT,
+    secure: config.SMTP_PORT === 465,
+    auth: { user: config.SMTP_USER, pass: config.SMTP_PASSWORD },
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 15_000
+  });
+  const link = `${config.FRONTEND_URL}/verify?token=${encodeURIComponent(token)}`;
+  await transporter.sendMail({
+    from: config.EMAIL_FROM,
+    to: email,
+    subject: "Verify your CampusBid student account",
+    text: `Use this one-time link to verify your college email address. It expires in 24 hours:\n\n${link}\n\nIf you did not create a CampusBid account, you can ignore this message.`
+  });
+}
 
 function publicUser(user: { _id: Types.ObjectId; email: string; displayName: string; verifiedAt: Date | null }) {
   return { id: user._id.toString(), email: user.email, displayName: user.displayName, verified: Boolean(user.verifiedAt) };
@@ -123,7 +153,10 @@ const listingSchema = z.object({
   category: z.enum(["Cycles", "Calculators", "Books", "Electronics", "Other"]),
   description: z.string().trim().min(10).max(4000),
   condition: z.enum(["New", "Like New", "Good", "Fair", "Poor"]),
-  photos: z.array(z.string().regex(/^\/uploads\/[a-zA-Z0-9._-]+$/)).min(1).max(5),
+  photos: z.array(z.string().refine((value) => {
+    if (/^\/uploads\/[a-zA-Z0-9._-]+$/.test(value)) return true;
+    try { return new URL(value).protocol === "https:"; } catch { return false; }
+  }, "Photo must be an uploaded local or secure hosted image.")).min(1).max(5),
   startingPrice: z.number().finite().positive().max(1_000_000),
   minimumIncrement: z.number().finite().positive().max(100_000),
   closesAt: z.string().datetime()
@@ -152,6 +185,7 @@ export function createApp(services: AppServices = defaultServices) {
     legacyHeaders: false,
     message: { error: "Too many authentication attempts. Try again later." }
   });
+  app.use("/api", rateLimit({ windowMs: 15 * 60 * 1000, limit: 240, standardHeaders: "draft-8", legacyHeaders: false, message: { error: "Too many requests. Try again shortly." } }));
   app.use("/api/auth", authLimiter);
 
   app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
@@ -165,7 +199,18 @@ export function createApp(services: AppServices = defaultServices) {
     const rawToken = randomBytes(32).toString("base64url");
     const verificationTokenHash = createHash("sha256").update(rawToken).digest("hex");
     try {
-      await User.create({ email, passwordHash, displayName, verificationTokenHash });
+      await User.create({
+        email,
+        passwordHash,
+        displayName,
+        verificationTokenHash,
+        verificationExpiresAt: new Date(services.now().getTime() + 24 * 60 * 60 * 1000)
+      });
+      try {
+        await deliverVerificationEmail(email, rawToken);
+      } catch {
+        return res.status(503).json({ error: "Account created, but the verification email could not be sent. Request a new verification link shortly." });
+      }
       const response: Record<string, unknown> = { message: "Registration successful. Verify your college email to activate bidding." };
       if (config.NODE_ENV !== "production") response.developmentVerificationToken = rawToken;
       return res.status(201).json(response);
@@ -180,14 +225,33 @@ export function createApp(services: AppServices = defaultServices) {
     if (!token.success) return res.status(400).json({ error: "A valid verification token is required." });
     const verificationTokenHash = createHash("sha256").update(token.data).digest("hex");
     const user = await User.findOneAndUpdate(
-      { verificationTokenHash, verifiedAt: null },
-      { $set: { verifiedAt: services.now() }, $unset: { verificationTokenHash: 1 } },
+      { verificationTokenHash, verificationExpiresAt: { $gt: services.now() }, verifiedAt: null },
+      { $set: { verifiedAt: services.now() }, $unset: { verificationTokenHash: 1, verificationExpiresAt: 1 } },
       { new: true }
     );
     if (!user) return res.status(400).json({ error: "This verification link is invalid or has expired." });
     await new Promise<void>((resolve, reject) => req.session.regenerate((error) => error ? reject(error) : resolve()));
     req.session.userId = user.id;
     return res.json({ user: publicUser(user) });
+  }, services));
+
+  app.post("/api/auth/resend-verification", asyncRoute(async (req, res) => {
+    const input = z.object({ email: z.string().email().max(254) }).safeParse(req.body);
+    if (!input.success) return res.status(400).json({ error: "Enter a valid email address." });
+    const response = { message: "If an unverified account exists for that address, a new verification link has been sent." };
+    const user = await User.findOne({ email: input.data.email.toLowerCase(), verifiedAt: null }).select("+verificationTokenHash +verificationExpiresAt");
+    if (!user || !emailAllowed(user.email)) return res.json(response);
+    const rawToken = randomBytes(32).toString("base64url");
+    user.verificationTokenHash = createHash("sha256").update(rawToken).digest("hex");
+    user.verificationExpiresAt = new Date(services.now().getTime() + 24 * 60 * 60 * 1000);
+    await user.save();
+    try {
+      await deliverVerificationEmail(user.email, rawToken);
+    } catch {
+      return res.status(503).json({ error: "Verification email could not be sent. Check the email provider configuration and try again." });
+    }
+    if (config.NODE_ENV !== "production") return res.json({ ...response, developmentVerificationToken: rawToken });
+    return res.json(response);
   }, services));
 
   app.post("/api/auth/login", asyncRoute(async (req, res) => {
@@ -207,33 +271,40 @@ export function createApp(services: AppServices = defaultServices) {
     return res.status(204).end();
   }, services));
 
-  app.get("/api/auth/me", requireAuth, asyncRoute(async (req, res) => {
+  app.get("/api/auth/me", asyncRoute(async (req, res) => {
+    if (!req.session.userId || !Types.ObjectId.isValid(req.session.userId)) return res.json({ user: null });
     const user = await User.findById(req.session.userId).select("email displayName verifiedAt");
-    if (!user) return res.status(401).json({ error: "Your session is no longer valid." });
+    if (!user) return res.json({ user: null });
     return res.json({ user: publicUser(user) });
   }, services));
 
-  app.post("/api/uploads", requireVerified, (req, res, next) => {
-    if (config.NODE_ENV === "production") {
-      res.status(503).json({ error: "Production image storage is not configured. Configure Cloudinary before accepting uploads." });
-      return;
-    }
-    next();
-  }, uploadMiddleware().single("photo"), asyncRoute(async (req, res) => {
+  app.post("/api/uploads", requireVerified, uploadMiddleware().single("photo"), asyncRoute(async (req, res) => {
     const file = (req as Request & { file?: Express.Multer.File }).file;
     if (!file) return res.status(400).json({ error: "Choose an image file." });
-    const detected = await fileTypeFromFile(file.path);
+    const detected = await fileTypeFromBuffer(file.buffer);
     if (!detected || !allowedPhotoTypes.has(detected.mime)) {
-      await fs.unlink(file.path);
       return res.status(400).json({ error: "Only valid JPEG, PNG, or WebP images are accepted." });
     }
-    const url = `/uploads/${path.basename(file.path)}`;
-    try {
-      await PhotoAsset.create({ ownerId: req.session.userId, url, mimeType: detected.mime });
-    } catch (error) {
-      await fs.unlink(file.path);
-      throw error;
+    let url: string;
+    if (config.IMAGE_STORAGE_PROVIDER === "cloudinary") {
+      const upload = await new Promise<{ secure_url: string }>((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          { folder: "campusbid/items", resource_type: "image", allowed_formats: ["jpg", "jpeg", "png", "webp"] },
+          (error, result) => {
+            if (error || !result) reject(error ?? new Error("Image storage returned no result."));
+            else resolve(result);
+          }
+        );
+        stream.end(file.buffer);
+      });
+      url = upload.secure_url;
+    } else {
+      await fs.mkdir(uploadsDirectory, { recursive: true });
+      const name = `${randomBytes(18).toString("hex")}.${detected.ext}`;
+      await fs.writeFile(path.join(uploadsDirectory, name), file.buffer, { flag: "wx" });
+      url = `/uploads/${name}`;
     }
+    await PhotoAsset.create({ ownerId: req.session.userId, url, mimeType: detected.mime });
     return res.status(201).json({ url });
   }, services));
 
@@ -259,9 +330,10 @@ export function createApp(services: AppServices = defaultServices) {
     if (filters.category) selector.category = filters.category;
     if (filters.condition) selector.condition = filters.condition;
     if (filters.minPrice !== undefined || filters.maxPrice !== undefined) {
-      selector.startingPricePaise = {};
-      if (filters.minPrice !== undefined) (selector.startingPricePaise as Record<string, number>).$gte = toPaise(filters.minPrice);
-      if (filters.maxPrice !== undefined) (selector.startingPricePaise as Record<string, number>).$lte = toPaise(filters.maxPrice);
+      const bounds = [];
+      if (filters.minPrice !== undefined) bounds.push({ $gte: [{ $ifNull: ["$leadingAmountPaise", "$startingPricePaise"] }, toPaise(filters.minPrice)] });
+      if (filters.maxPrice !== undefined) bounds.push({ $lte: [{ $ifNull: ["$leadingAmountPaise", "$startingPricePaise"] }, toPaise(filters.maxPrice)] });
+      selector.$expr = { $and: bounds };
     }
     if (filters.closingSoon === "true") selector.closesAt = { $gt: services.now(), $lte: new Date(services.now().getTime() + 24 * 60 * 60 * 1000) };
     const sort: Record<string, 1 | -1> = filters.sort === "newest" ? { createdAt: -1 } : filters.sort === "price-low" ? { startingPricePaise: 1 } : filters.sort === "price-high" ? { startingPricePaise: -1 } : { closesAt: 1 };
@@ -484,12 +556,12 @@ export function createApp(services: AppServices = defaultServices) {
   app.get("/api/dashboard", requireAuth, asyncRoute(async (req, res) => {
     const [listings, auctionsWithBids, notifications] = await Promise.all([
       Listing.find({ sellerId: req.session.userId }).sort({ createdAt: -1 }).limit(50).lean(),
-      Listing.find({ "bidHistory.bidderId": req.session.userId }).select("_id bidHistory").lean(),
+      Listing.find({ "bidHistory.bidderId": req.session.userId }).select("_id title bidHistory").lean(),
       Notification.countDocuments({ recipientId: req.session.userId, readAt: null })
     ]);
     const ownBids = auctionsWithBids.flatMap((item) => item.bidHistory
       .filter((bid) => bid.bidderId.toString() === req.session.userId)
-      .map((bid) => ({ id: bid.bidId.toString(), listingId: item._id.toString(), amount: toRupees(bid.amountPaise), createdAt: bid.createdAt })))
+      .map((bid) => ({ id: bid.bidId.toString(), listingId: item._id.toString(), listingTitle: item.title, amount: toRupees(bid.amountPaise), createdAt: bid.createdAt })))
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .slice(0, 50);
     return res.json({
@@ -523,17 +595,7 @@ export function createApp(services: AppServices = defaultServices) {
 
 function uploadMiddleware() {
   return multer({
-    storage: multer.diskStorage({
-      destination: async (_req, _file, callback) => {
-        try {
-          await fs.mkdir(uploadsDirectory, { recursive: true });
-          callback(null, uploadsDirectory);
-        } catch (error) {
-          callback(error as Error, uploadsDirectory);
-        }
-      },
-      filename: (_req, file, callback) => callback(null, `${randomBytes(18).toString("hex")}${path.extname(file.originalname).toLowerCase()}`)
-    }),
+    storage: multer.memoryStorage(),
     limits: { fileSize: 5 * 1024 * 1024, files: 1 },
     fileFilter: (_req, file, callback) => callback(null, allowedPhotoTypes.has(file.mimetype))
   });

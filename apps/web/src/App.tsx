@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useState, createContext, useContext, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useState, createContext, useContext, type FormEvent, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
 import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { io } from "socket.io-client";
@@ -27,24 +27,24 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
-  const refreshUser = async () => {
+  const refreshUser = useCallback(async () => {
     try {
-      const result = await api<{ user: User }>("/auth/me");
+      const result = await api<{ user: User | null }>("/auth/me");
       setUser(result.user);
     } catch (error) {
       if (error instanceof ApiError && error.status !== 401) throw error;
       setUser(null);
     }
-  };
+  }, []);
   useEffect(() => {
     void refreshUser().finally(() => setAuthReady(true));
-  }, []);
+  }, [refreshUser]);
 
-  const toast = (text: string, tone: ToastMessage["tone"] = "success") => {
+  const toast = useCallback((text: string, tone: ToastMessage["tone"] = "success") => {
     const id = Date.now() + Math.random();
     setToasts((current) => [...current, { id, text, tone }]);
     window.setTimeout(() => setToasts((current) => current.filter((entry) => entry.id !== id)), 4200);
-  };
+  }, []);
 
   if (!authReady) return <div className="min-h-screen bg-canvas" aria-label="Loading CampusBid" />;
   return (
@@ -164,10 +164,11 @@ function Marketplace() {
   const maxPrice = search.get("maxPrice") ?? "";
   const sort = search.get("sort") ?? "ending";
   const closingSoon = search.get("closingSoon") === "true";
-  const reload = async (targetPage = 1) => {
+  const filterKey = search.toString();
+  const reload = useCallback(async (targetPage = 1) => {
     setLoading(true);
     setError("");
-    const parameters = new URLSearchParams(search);
+    const parameters = new URLSearchParams(filterKey);
     parameters.set("page", String(targetPage));
     try {
       const result = await api<{ items: Listing[]; total: number; pages: number }>(`/listings?${parameters.toString()}`);
@@ -180,8 +181,8 @@ function Marketplace() {
     } finally {
       setLoading(false);
     }
-  };
-  useEffect(() => { void reload(); }, [search.toString()]);
+  }, [filterKey]);
+  useEffect(() => { void reload(); }, [reload]);
   const updateFilter = (key: string, value: string) => {
     const next = new URLSearchParams(search);
     if (value) next.set(key, value);
@@ -317,6 +318,7 @@ function ListingSkeleton() {
 function ListingDetail() {
   const { id = "" } = useParams();
   const { user } = useAuth();
+  const isAuthenticated = Boolean(user);
   const toast = useToast();
   const [item, setItem] = useState<Listing | null>(null);
   const [loading, setLoading] = useState(true);
@@ -324,7 +326,7 @@ function ListingDetail() {
   const [bid, setBid] = useState("");
   const [now, setNow] = useState(Date.now());
   const [handover, setHandover] = useState<{ sellerConfirmedAt: string | null; buyerConfirmedAt: string | null; failedPickupAt: string | null } | null>(null);
-  const load = async () => {
+  const load = useCallback(async () => {
     setError("");
     try {
       const response = await api<{ listing: Listing; bidHistory: Listing["bidHistory"] }>(`/listings/${id}`);
@@ -334,26 +336,26 @@ function ListingDetail() {
     } finally {
       setLoading(false);
     }
-  };
-  useEffect(() => { void load(); }, [id]);
+  }, [id]);
+  useEffect(() => { void load();   }, [id, load]);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
   useEffect(() => {
     if (!id) return;
-    const socket = io({ withCredentials: true, reconnection: true, autoConnect: Boolean(user) });
+    const socket = io({ withCredentials: true, reconnection: true, autoConnect: isAuthenticated });
     socket.on("connect", () => socket.emit("auction:subscribe", id, () => void load()));
     socket.on("auction:updated", (event: { listingId?: string }) => {
       if (event.listingId === id) void load();
     });
     return () => { socket.disconnect(); };
-  }, [id, user?.id]);
+  }, [id, isAuthenticated, load]);
   useEffect(() => {
-    if (item?.saleOutcome === "Awaiting handover" && user) {
-      void api<typeof handover>(`/listings/${id}/handover`).then(setHandover).catch(() => undefined);
+    if (item?.saleOutcome === "Awaiting handover" && isAuthenticated) {
+      void api<typeof handover>(`/listings/${id}/handover`).then(setHandover).catch((failure) => setError(messageOf(failure)));
     }
-  }, [item?.saleOutcome, id, user]);
+  }, [item?.saleOutcome, id, isAuthenticated]);
 
   const placeBid = async (event: FormEvent) => {
     event.preventDefault();
@@ -554,7 +556,7 @@ function VerifyPage() {
     void api<{ user: User }>("/auth/verify", { method: "POST", body: JSON.stringify({ token }) })
       .then((result) => { setUser(result.user); setDone(true); toast("Email verified."); })
       .catch((failure) => setError(messageOf(failure)));
-  }, [token]);
+  }, [token, setUser, toast]);
   return <div className="page-shell max-w-xl py-20 text-center"><div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-mint text-3xl text-forest">✓</div><h1 className="mt-6 font-display text-4xl">Email verification</h1>{error ? <p className="mt-4 text-red-700">{error}</p> : <p className="mt-4 text-ink/60">{done ? "Your account is ready." : token ? "Checking your one-time link…" : "Open the verification link from your college email."}</p>}{done && <button className="button-primary mt-6" onClick={() => navigate("/dashboard")}>Continue to dashboard</button>}</div>;
 }
 
@@ -582,12 +584,13 @@ function ListingForm({ edit = false }: { edit?: boolean }) {
     resolver: zodResolver(listingFormSchema),
     defaultValues: { category: "Other", condition: "Good", startingPrice: 100, minimumIncrement: 10 }
   });
+  const resetForm = form.reset;
   useEffect(() => {
     if (!edit) return;
     void api<{ listing: Listing }>(`/listings/${id}`).then(({ listing }) => {
       setItem(listing);
       setPhotos(listing.photos);
-      form.reset({
+      resetForm({
         title: listing.title,
         category: listing.category,
         condition: listing.condition,
@@ -597,7 +600,7 @@ function ListingForm({ edit = false }: { edit?: boolean }) {
         closesAt: toLocalDateTime(listing.closesAt)
       });
     }).catch((failure) => setError(messageOf(failure)));
-  }, [edit, id]);
+  }, [edit, id, resetForm]);
 
   const addPhotos = async (files: FileList | null) => {
     if (!files?.length) return;
@@ -714,7 +717,7 @@ function MyListings() {
 }
 
 function MyBids() {
-  const [rows, setRows] = useState<Array<{ id: string; listingId: string; amount: number; createdAt: string }>>([]);
+  const [rows, setRows] = useState<Array<{ id: string; listingId: string; listingTitle: string; amount: number; createdAt: string }>>([]);
   const [listings, setListings] = useState<Record<string, Listing>>({});
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -725,7 +728,7 @@ function MyBids() {
     }).catch((failure) => setError(messageOf(failure))).finally(() => setLoading(false));
   }, []);
   return <div className="page-shell py-10 md:py-14"><p className="section-kicker">Buyer workspace</p><h1 className="mt-2 font-display text-4xl">My bids</h1>{error && <ErrorBanner message={error} />}
-    {loading ? <div className="mt-8 space-y-3"><div className="skeleton h-20 rounded-2xl" /><div className="skeleton h-20 rounded-2xl" /></div> : rows.length ? <div className="mt-8 space-y-3">{rows.map((bid) => <Link key={bid.id} to={`/listings/${bid.listingId}`} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-white p-5 no-underline shadow-card"><div><p className="font-semibold">{listings[bid.listingId]?.title ?? "Campus auction"}</p><p className="mt-1 text-sm text-ink/50">Bid placed {formatTime(bid.createdAt)}</p></div><p className="font-bold text-forest">{formatRupees(bid.amount)}</p></Link>)}</div> : <EmptyState icon="⌁" title="No bids yet" message="Find something you like and place a fair, transparent bid." action={<Link to="/" className="button-primary">Explore auctions</Link>} />}
+    {loading ? <div className="mt-8 space-y-3"><div className="skeleton h-20 rounded-2xl" /><div className="skeleton h-20 rounded-2xl" /></div> : rows.length ?     <div className="mt-8 space-y-3">{rows.map((bid) => <Link key={bid.id} to={`/listings/${bid.listingId}`} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-white p-5 no-underline shadow-card"><div><p className="font-semibold">{bid.listingTitle || listings[bid.listingId]?.title || "Campus auction"}</p><p className="mt-1 text-sm text-ink/50">Bid placed {formatTime(bid.createdAt)}</p></div><p className="font-bold text-forest">{formatRupees(bid.amount)}</p></Link>)}</div> : <EmptyState icon="⌁" title="No bids yet" message="Find something you like and place a fair, transparent bid." action={<Link to="/" className="button-primary">Explore auctions</Link>} />}
   </div>;
 }
 
@@ -750,7 +753,7 @@ function Notifications() {
 }
 
 function Field({ label, error, children }: { label: string; error?: string; children: ReactNode }) {
-  return <div><label className="field-label">{label}</label><div className="mt-2">{children}</div>{error && <p role="alert" className="mt-1 text-xs text-red-700">{error}</p>}</div>;
+  return <div><label className="field-label">{label}<span className="mt-2 block font-normal">{children}</span></label>{error && <p role="alert" className="mt-1 text-xs text-red-700">{error}</p>}</div>;
 }
 
 function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: "neutral" | "green" }) {

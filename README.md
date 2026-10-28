@@ -25,6 +25,18 @@ CampusBid is a campus-only second-hand auction marketplace for students. Each li
 
 The application is a simple npm-workspaces monorepo. The web client calls the Express API; the API is authoritative for identity, permissions, auction state, timestamps, bids, and sale transitions. MongoDB persists users, listings, bids, notifications, and workflow records. Socket.IO is used only to distribute persisted updates.
 
+## API overview
+
+- `POST /api/auth/register`, `/api/auth/verify`, `/api/auth/resend-verification`, `/api/auth/login`, and `/api/auth/logout`
+- `GET /api/listings` with keyword, category, condition, effective-price, closing-soon, sorting, and pagination filters
+- `POST /api/listings` and owner-scoped listing read/edit/cancel operations
+- `POST /api/listings/:id/bids` for server-validated manual bids
+- `POST /api/listings/:id/decision` for the seller decision after close
+- Handover confirmation and failed-pickup routes under `/api/listings/:id/handover`
+- `GET /api/notifications` and `POST /api/notifications/:id/read`
+
+The authenticated dashboard returns the current student's listings, bids, and unread notification count.
+
 ## Repository structure
 
 ```text
@@ -55,9 +67,9 @@ Configure `.env` before starting. Generate a session secret with:
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 ```
 
-The default MongoDB URI is for a local development database. For Atlas, set `MONGODB_URI` to the connection string in your local `.env`; do not commit it. The allowed college email domains are configurable and are intentionally not assumed. Development verification must be clearly identified and must not be used as production email verification.
+The default MongoDB URI is for a local development database. For Atlas, set `MONGODB_URI` to the connection string in your local `.env`; do not commit it. The allowed college email domains are configurable and are intentionally not assumed. Development verification returns a one-time token in the response and must never be treated as production email verification. Production startup requires `EMAIL_PROVIDER=smtp`, `EMAIL_FROM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `COOKIE_SECURE=true`; verification links expire after 24 hours.
 
-Image storage, SMTP email, and AI integrations are configured via environment variables. The AI assistant is optional and is not required for the basic marketplace.
+Local development photos are content-sniffed, size-limited, and stored under the ignored `uploads/` folder. For persistent production photos, set `IMAGE_STORAGE_PROVIDER=cloudinary` and configure `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET`. AI is optional and is not required for the basic marketplace.
 
 ## Development and verification
 
@@ -69,7 +81,7 @@ npm run typecheck
 npm test
 ```
 
-The API and web app have workspace-specific scripts; see their package manifests once available.
+The API and web app have workspace-specific scripts in `apps/api/package.json` and `apps/web/package.json`.
 
 ## Auction rules
 
@@ -92,4 +104,4 @@ Deployment guidance will be added after local functionality and tests pass. No p
 
 ## Known limitations
 
-Production email and image storage, optional AI, and production deployment require separately configured credentials. Local verification returns a development-only token and is not production email verification. The complete browser-level basic lifecycle and all specified edge cases remain to be verified.
+Optional AI and production deployment require separately configured credentials. Local verification returns a development-only token and is not production email verification. The complete browser-level basic lifecycle and all specified edge cases remain to be verified.

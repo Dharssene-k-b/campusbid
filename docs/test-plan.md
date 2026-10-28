@@ -19,3 +19,12 @@ Where practical, use Playwright to register students, create and find a listing,
 ## Required commands
 
 Run lint, typecheck, unit/API tests, and production builds. Record actual commands and outcomes; do not represent unrun tests as passing.
+
+## Current verified checks
+
+- API integration suite: 5 tests passing (registration/verification, listing/search, valid/invalid/concurrent bids, closing and seller outcome paths, handover/notification behavior, ownership, cancellation history, and upload validation).
+- Frontend suite: 1 marketplace test passing (empty state and category-filter request).
+- Root lint, typecheck, and production build complete successfully.
+- `npm audit`: zero known vulnerabilities at the latest check.
+
+This is not the final basic-feature completion gate. Browser-level end-to-end coverage and additional edge cases still need to be added and run.

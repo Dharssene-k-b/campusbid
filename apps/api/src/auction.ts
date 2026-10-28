@@ -129,7 +129,14 @@ export async function confirmHandover(
 
 export async function markFailedPickup(listingId: string, actorId: Types.ObjectId, now: Date): Promise<void> {
   const handover = await Handover.findOneAndUpdate(
-    { listingId, $or: [{ sellerId: actorId }, { buyerId: actorId }], failedPickupAt: null },
+    {
+      listingId,
+      $and: [
+        { $or: [{ sellerId: actorId }, { buyerId: actorId }] },
+        { failedPickupAt: null },
+        { $or: [{ sellerConfirmedAt: null }, { buyerConfirmedAt: null }] }
+      ]
+    },
     { $set: { failedPickupAt: now, failedPickupActorId: actorId } },
     { new: true }
   );

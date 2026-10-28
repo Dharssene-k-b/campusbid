@@ -1,0 +1,23 @@
+{
+  "name": "campusbid",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,green \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm run dev -w @campusbid/api",
+    "dev:web": "npm run dev -w @campusbid/web",
+    "build": "npm run build -w @campusbid/api && npm run build -w @campusbid/web",
+    "lint": "npm run lint -w @campusbid/api && npm run lint -w @campusbid/web",
+    "typecheck": "npm run typecheck -w @campusbid/api && npm run typecheck -w @campusbid/web",
+    "test": "npm run test -w @campusbid/api && npm run test -w @campusbid/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  }
+}

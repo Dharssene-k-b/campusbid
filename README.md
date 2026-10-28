@@ -2,7 +2,7 @@
 
 CampusBid is a campus-only second-hand auction marketplace for students. Each listing is an independent timed auction with a public bid history, minimum increment, seller decision, and recorded handover outcome.
 
-> **Project status:** Repository initialized. Application features are being implemented in roadmap order; this is not yet a production-ready marketplace.
+> **Project status:** Basic API and responsive web interface are under active development. Authentication, listings, bidding, seller decisions, handover, notifications, and marketplace views are implemented locally. The complete basic-feature gate and all specified edge cases have not yet been verified; this is not production-ready.
 
 ## Planned features
 
@@ -47,6 +47,8 @@ npm install
 npm run dev
 ```
 
+Open the frontend at [http://localhost:5173](http://localhost:5173). The API health endpoint is [http://localhost:4000/api/health](http://localhost:4000/api/health). The Vite development server proxies API and Socket.IO requests to the local API.
+
 Configure `.env` before starting. Generate a session secret with:
 
 ```powershell
@@ -90,4 +92,4 @@ Deployment guidance will be added after local functionality and tests pass. No p
 
 ## Known limitations
 
-The application is not yet implemented. External email, image storage, and AI providers require separately configured credentials. No deployment has been performed.
+Production email and image storage, optional AI, and production deployment require separately configured credentials. Local verification returns a development-only token and is not production email verification. The complete browser-level basic lifecycle and all specified edge cases remain to be verified.

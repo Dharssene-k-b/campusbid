@@ -3,11 +3,11 @@
 ## Required implementation order
 
 - [x] Phase 0: inspect workspace and initialize GitHub repository
-- [ ] Phase 0: initial planning commit pushed
-- [ ] Phase 1: authentication and listing management
-- [ ] Phase 2: browsing, auction details, and bidding
-- [ ] Phase 3: auction closing, seller decision, and sale completion
-- [ ] Phase 4: persistent notifications and live updates
+- [x] Phase 0: initial planning commit pushed
+- [ ] Phase 1: authentication and listing management (API implemented; UI and full verification in progress)
+- [ ] Phase 2: browsing, auction details, and bidding (API and UI implemented; broader verification in progress)
+- [ ] Phase 3: auction closing, seller decision, and sale completion (API implemented; UI and edge-case verification in progress)
+- [ ] Phase 4: persistent notifications and live updates (persistent notifications implemented; live event delivery in progress)
 - [ ] Phase 5: verify complete basic lifecycle and edge cases
 - [ ] Phase 6.1: saved-search alerts
 - [ ] Phase 6.2: questions and answers

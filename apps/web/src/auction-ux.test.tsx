@@ -1,14 +1,33 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type { Listing } from "./types";
+
+const socketHarness = vi.hoisted(() => ({
+  listeners: new Map<string, (event?: { listingId?: string }) => void>(),
+  emit: vi.fn(),
+  disconnect: vi.fn()
+}));
+
+vi.mock("socket.io-client", () => ({
+  io: vi.fn(() => ({
+    on: (event: string, listener: (event?: { listingId?: string }) => void) => {
+      socketHarness.listeners.set(event, listener);
+    },
+    emit: socketHarness.emit,
+    disconnect: socketHarness.disconnect
+  }))
+}));
 
 const student = { id: "student-id", email: "student@kongu.edu", displayName: "Kongu Student", verified: true };
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  socketHarness.listeners.clear();
+  socketHarness.emit.mockClear();
+  socketHarness.disconnect.mockClear();
 });
 
 function listing(overrides: Partial<Listing> = {}): Listing {
@@ -124,6 +143,62 @@ describe("CampusBid photo upload UX", () => {
 });
 
 describe("CampusBid auction status actions", () => {
+  it("subscribes authenticated marketplace viewers and refreshes the leading bid live", async () => {
+    let leadingAmount: number | null = null;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/auth/me")) return Response.json({ user: student });
+      if (url.includes("/listings?")) {
+        return Response.json({
+          items: [listing({ leadingAmount, minimumNextBid: leadingAmount === null ? 200 : leadingAmount + 20 })],
+          total: 1,
+          pages: 1
+        });
+      }
+      return Response.json({ error: "Unexpected request." }, { status: 404 });
+    });
+    render(<MemoryRouter><App /></MemoryRouter>);
+
+    expect(await screen.findByText("₹200.00")).toBeInTheDocument();
+    socketHarness.listeners.get("connect")?.();
+    expect(socketHarness.emit).toHaveBeenCalledWith("auction:subscribe", "507f1f77bcf86cd799439011");
+
+    leadingAmount = 250;
+    socketHarness.listeners.get("auction:updated")?.({ listingId: "507f1f77bcf86cd799439011" });
+    expect(await screen.findByText("₹250.00")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/listings?")).length).toBeGreaterThan(1);
+  });
+
+  it("refreshes public marketplace bids for signed-out viewers", async () => {
+    let leadingAmount: number | null = null;
+    let refreshPublicListings: (() => void) | undefined;
+    vi.spyOn(window, "setInterval").mockImplementation(((handler: TimerHandler, delay?: number) => {
+      if (delay === 15_000 && typeof handler === "function") refreshPublicListings = handler as () => void;
+      return 1;
+    }) as typeof window.setInterval);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/auth/me")) return Response.json({ user: null });
+      if (url.includes("/listings?")) {
+        return Response.json({
+          items: [listing({ leadingAmount, minimumNextBid: leadingAmount === null ? 200 : leadingAmount + 20 })],
+          total: 1,
+          pages: 1
+        });
+      }
+      return Response.json({ error: "Unexpected request." }, { status: 404 });
+    });
+    render(<MemoryRouter><App /></MemoryRouter>);
+
+    expect(await screen.findByText("₹200.00")).toBeInTheDocument();
+    expect(refreshPublicListings).toBeDefined();
+    leadingAmount = 250;
+    await act(async () => {
+      refreshPublicListings?.();
+    });
+    expect(await screen.findByText("₹250.00")).toBeInTheDocument();
+  });
+
   it("hides cancellation after success and does not optimistically cancel on failure", async () => {
     const auction = listing({ isSeller: true });
     const fetchMock = installApi({ auction });
@@ -156,12 +231,15 @@ describe("CampusBid auction status actions", () => {
       saleOutcome: "Pending seller decision",
       isSeller: true,
       hasProvisionalWinner: true,
+      provisionalWinner: { displayName: "Winning Bidder", amount: 220 },
       bidHistory: [{ id: "bid-id", bidderAlias: "Bidder", amount: 220, type: "manual", createdAt: new Date().toISOString() }]
     });
     installApi({ auction: eligible });
     render(<MemoryRouter initialEntries={["/listings/507f1f77bcf86cd799439011"]}><App /></MemoryRouter>);
     expect(await screen.findByRole("button", { name: "Approve Winning Bid" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reject Winning Bid" })).toBeInTheDocument();
+    expect(screen.getByText("Winning Bidder")).toBeInTheDocument();
+    expect(screen.getByText("Winning bid:")).toBeInTheDocument();
 
     cleanup();
     installApi({ auction: listing({ biddingStatus: "Closed", saleOutcome: "Unsold", isSeller: true }) });

@@ -17,7 +17,7 @@ import { z } from "zod";
 import { konguEmailSchema, normalizedEmailSchema, registrationPasswordSchema } from "../../../shared/registration-validation.js";
 import { config } from "./config.js";
 import { Handover, Listing, Notification, PhotoAsset, User, toPaise, toRupees } from "./models.js";
-import { closeExpiredAuctions, confirmHandover, decideSale, makeNotification, markFailedPickup } from "./auction.js";
+import { closeExpiredAuctions, confirmHandover, decideSale, getWinningBid, makeNotification, markFailedPickup } from "./auction.js";
 
 declare module "express-session" {
   interface SessionData {
@@ -52,6 +52,7 @@ const sessionMiddleware = session({
 export type AppServices = {
   now: () => Date;
   emitAuctionUpdate: (listingId: string) => void;
+  skipAuthRateLimits?: boolean;
 };
 
 const defaultServices: AppServices = { now: () => new Date(), emitAuctionUpdate: () => undefined };
@@ -176,18 +177,25 @@ export function createApp(services: AppServices = defaultServices) {
   app.use("/api/uploads", express.static(uploadsDirectory, { dotfiles: "deny", index: false, maxAge: "1h" }));
   const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    limit: 30,
+    limit: 10,
     standardHeaders: "draft-8",
     legacyHeaders: false,
-    skip: () => config.NODE_ENV === "test",
-    message: { error: "Too many authentication attempts. Try again later." }
+    skipSuccessfulRequests: true,
+    skip: () => services.skipAuthRateLimits ?? config.NODE_ENV === "test",
+    message: { error: "Too many failed authentication attempts. Try again later." }
   });
-  app.use("/api", rateLimit({ windowMs: 15 * 60 * 1000, limit: 240, standardHeaders: "draft-8", legacyHeaders: false, message: { error: "Too many requests. Try again shortly." } }));
-  app.use("/api/auth", authLimiter);
+  app.use("/api", rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 240,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    skip: (req) => req.path === "/auth/me",
+    message: { error: "Too many requests. Try again shortly." }
+  }));
 
   app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
 
-  app.post("/api/auth/register", asyncRoute(async (req, res) => {
+  app.post("/api/auth/register", authLimiter, asyncRoute(async (req, res) => {
     const parsed = registrationSchema.safeParse(req.body);
     if (!parsed.success) {
       const fields = parsed.error.issues.map((issue) => ({
@@ -222,7 +230,7 @@ export function createApp(services: AppServices = defaultServices) {
     }
   }, services));
 
-  app.post("/api/auth/verify", asyncRoute(async (req, res) => {
+  app.post("/api/auth/verify", authLimiter, asyncRoute(async (req, res) => {
     const token = z.string().min(32).max(128).safeParse(req.body?.token);
     if (!token.success) return res.status(400).json({ error: "A valid verification token is required." });
     const verificationTokenHash = createHash("sha256").update(token.data).digest("hex");
@@ -237,7 +245,7 @@ export function createApp(services: AppServices = defaultServices) {
     return res.json({ user: publicUser(user) });
   }, services));
 
-  app.post("/api/auth/resend-verification", asyncRoute(async (req, res) => {
+  app.post("/api/auth/resend-verification", authLimiter, asyncRoute(async (req, res) => {
     const input = z.object({ email: normalizedEmailSchema }).safeParse(req.body);
     if (!input.success) return res.status(400).json({ error: "Enter a valid email address." });
     const response = { message: "If an unverified account exists for that address, a new verification link has been sent." };
@@ -256,7 +264,7 @@ export function createApp(services: AppServices = defaultServices) {
     return res.json(response);
   }, services));
 
-  app.post("/api/auth/login", asyncRoute(async (req, res) => {
+  app.post("/api/auth/login", authLimiter, asyncRoute(async (req, res) => {
     const input = z.object({ email: normalizedEmailSchema, password: z.string().min(1).max(128) }).safeParse(req.body);
     if (!input.success) return res.status(400).json({ error: "Email and password are required." });
     const user = await User.findOne({ email: input.data.email, accountStatus: "active" }).select("+passwordHash");
@@ -381,13 +389,23 @@ export function createApp(services: AppServices = defaultServices) {
     const listing = await Listing.findById(id).lean();
     if (!listing) return res.status(404).json({ error: "Auction not found." });
     const seller = await User.findById(listing.sellerId).select("displayName").lean();
+    const isSeller = Boolean(req.session.userId && listing.sellerId.toString() === req.session.userId);
+    let provisionalWinner: { displayName: string; amount: number } | undefined;
+    if (isSeller && listing.biddingStatus === "Closed" && listing.saleOutcome === "Pending seller decision" && listing.provisionalWinnerId) {
+      const winningBid = getWinningBid(listing.bidHistory, listing.startingPricePaise);
+      if (winningBid?.bidderId.equals(listing.provisionalWinnerId)) {
+        const winner = await User.findById(winningBid.bidderId).select("displayName").lean();
+        if (winner) provisionalWinner = { displayName: winner.displayName, amount: winningBid.amountPaise / 100 };
+      }
+    }
     return res.json({
       listing: {
         ...safeListing(listing as never),
         sellerDisplayName: seller?.displayName ?? "Campus student",
-        isSeller: Boolean(req.session.userId && listing.sellerId.toString() === req.session.userId),
+        isSeller,
         isProvisionalWinner: Boolean(req.session.userId && listing.provisionalWinnerId?.toString() === req.session.userId),
-        hasProvisionalWinner: Boolean(listing.provisionalWinnerId)
+        hasProvisionalWinner: Boolean(listing.provisionalWinnerId),
+        ...(provisionalWinner ? { provisionalWinner } : {})
       },
       bidHistory: [...(listing.bidHistory ?? [])].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).map((bid) => ({
         id: bid.bidId.toString(),

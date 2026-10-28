@@ -1,7 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useCallback, useEffect, useMemo, useRef, useState, createContext, useContext, type FormEvent, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
-import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext, useParams, useSearchParams } from "react-router-dom";
 import { io } from "socket.io-client";
 import { z } from "zod";
 import { konguEmailSchema, normalizedEmailSchema, registrationPasswordSchema } from "../../../shared/registration-validation.js";
@@ -9,11 +9,20 @@ import { api, ApiError } from "./api";
 import { countdown, formatRupees, formatTime } from "./format";
 import type { Listing, User } from "./types";
 
-type AuthContextValue = { user: User | null; setUser: (user: User | null) => void; refreshUser: () => Promise<void> };
+type AuthContextValue = { user: User | null; setUser: (user: User | null) => void; refreshUser: () => Promise<void>; authError: string | null };
 const AuthContext = createContext<AuthContextValue | null>(null);
 type ToastMessage = { id: number; text: string; tone: "success" | "error" };
 const ToastContext = createContext<(text: string, tone?: ToastMessage["tone"]) => void>(() => undefined);
+let inFlightAuthCheck: Promise<{ user: User | null }> | null = null;
 
+function fetchCurrentUser(): Promise<{ user: User | null }> {
+  if (!inFlightAuthCheck) {
+    inFlightAuthCheck = api<{ user: User | null }>("/auth/me").finally(() => {
+      inFlightAuthCheck = null;
+    });
+  }
+  return inFlightAuthCheck;
+}
 function useAuth() {
   const context = useContext(AuthContext);
   if (!context) throw new Error("Auth context is missing.");
@@ -28,13 +37,19 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [authError, setAuthError] = useState<string | null>(null);
   const refreshUser = useCallback(async () => {
     try {
-      const result = await api<{ user: User | null }>("/auth/me");
+      const result = await fetchCurrentUser();
       setUser(result.user);
+      setAuthError(null);
     } catch (error) {
-      if (error instanceof ApiError && error.status !== 401) throw error;
-      setUser(null);
+      if (error instanceof ApiError && error.status === 401) {
+        setUser(null);
+        setAuthError(null);
+      } else {
+        setAuthError(messageOf(error));
+      }
     }
   }, []);
   useEffect(() => {
@@ -49,10 +64,10 @@ function App() {
 
   if (!authReady) return <div className="min-h-screen bg-canvas" aria-label="Loading CampusBid" />;
   return (
-    <AuthContext.Provider value={{ user, setUser, refreshUser }}>
+    <AuthContext.Provider value={{ user, setUser, refreshUser, authError }}>
       <ToastContext.Provider value={toast}>
         <Routes>
-          <Route element={<Layout />}>
+          <Route element={<Layout authError={authError} onRetryAuth={() => void refreshUser()} />}>
             <Route path="/" element={<Marketplace />} />
             <Route path="/login" element={<AuthPage mode="login" />} />
             <Route path="/register" element={<AuthPage mode="register" />} />
@@ -64,6 +79,7 @@ function App() {
             <Route path="/my-listings" element={<Protected><MyListings /></Protected>} />
             <Route path="/my-bids" element={<Protected><MyBids /></Protected>} />
             <Route path="/notifications" element={<Protected><Notifications /></Protected>} />
+            <Route path="/profile" element={<Protected><Profile /></Protected>} />
             <Route path="*" element={<NotFound />} />
           </Route>
         </Routes>
@@ -79,7 +95,7 @@ function App() {
   );
 }
 
-function Layout() {
+function Layout({ authError, onRetryAuth }: { authError: string | null; onRetryAuth: () => void }) {
   const { user, setUser } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
@@ -111,7 +127,7 @@ function Layout() {
             {user ? (
               <>
                 <Link to="/listings/new" className="button-primary !py-2.5">＋ List an item</Link>
-                <button className="avatar-button" onClick={logout} title={`Sign out ${user.displayName}`} aria-label="Sign out">{initials(user.displayName)}</button>
+                <Link to="/profile" className="avatar-button no-underline" title="Profile" aria-label="Profile">{initials(user.displayName)}</Link>
               </>
             ) : (
               <>
@@ -120,7 +136,9 @@ function Layout() {
               </>
             )}
           </div>
-          <button className="rounded-xl border border-line px-3 py-2 md:hidden" onClick={() => setMenuOpen((open) => !open)} aria-expanded={menuOpen} aria-label="Toggle menu">☰</button>
+          <div className="flex items-center gap-2 md:hidden">
+            <button className="rounded-xl border border-line px-3 py-2" onClick={() => setMenuOpen((open) => !open)} aria-expanded={menuOpen} aria-label="Toggle menu">☰</button>
+          </div>
         </div>
         {menuOpen && <div className="page-shell flex flex-col gap-2 border-t border-line py-4 md:hidden">
           <Link onClick={() => setMenuOpen(false)} to="/">Explore</Link>
@@ -128,11 +146,14 @@ function Layout() {
             <Link onClick={() => setMenuOpen(false)} to="/dashboard">Dashboard</Link>
             <Link onClick={() => setMenuOpen(false)} to="/listings/new">List an item</Link>
             <Link onClick={() => setMenuOpen(false)} to="/notifications">Notifications</Link>
-            <button onClick={logout} className="text-left">Sign out</button>
+            <Link onClick={() => setMenuOpen(false)} to="/profile">Profile</Link>
           </> : <><Link to="/login">Log in</Link><Link to="/register">Join campus</Link></>}
         </div>}
       </header>
-      <main className="min-h-[calc(100vh-150px)]"><Outlet /></main>
+      <main className="min-h-[calc(100vh-150px)]">
+        {authError && <div className="page-shell pt-4"><ErrorBanner message={authError} onRetry={onRetryAuth} /></div>}
+        <Outlet context={{ logout, authError }} />
+      </main>
       <footer className="border-t border-line bg-white/50">
         <div className="page-shell flex flex-col justify-between gap-2 py-6 text-sm text-ink/60 sm:flex-row">
           <p>CampusBid · Better things, passed on.</p>
@@ -144,13 +165,16 @@ function Layout() {
 }
 
 function Protected({ children }: { children: ReactNode }) {
-  const { user } = useAuth();
+  const { user, authError } = useAuth();
   const location = useLocation();
+  if (authError) return null;
   if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   return <>{children}</>;
 }
 
 function Marketplace() {
+  const { user } = useAuth();
+  const isAuthenticated = Boolean(user);
   const [search, setSearch] = useSearchParams();
   const [items, setItems] = useState<Listing[]>([]);
   const [loading, setLoading] = useState(true);
@@ -166,8 +190,8 @@ function Marketplace() {
   const sort = search.get("sort") ?? "ending";
   const closingSoon = search.get("closingSoon") === "true";
   const filterKey = search.toString();
-  const reload = useCallback(async (targetPage = 1) => {
-    setLoading(true);
+  const reload = useCallback(async (targetPage = 1, showLoading = true) => {
+    if (showLoading) setLoading(true);
     setError("");
     const parameters = new URLSearchParams(filterKey);
     parameters.set("page", String(targetPage));
@@ -180,10 +204,37 @@ function Marketplace() {
     } catch (failure) {
       setError(messageOf(failure));
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }, [filterKey]);
   useEffect(() => { void reload(); }, [reload]);
+  const visibleListingIds = items.map((item) => item._id).join(",");
+  useEffect(() => {
+    if (!visibleListingIds) return;
+    if (!isAuthenticated) {
+      const refresh = () => {
+        if (!document.hidden) void reload(page, false);
+      };
+      const timer = window.setInterval(refresh, 15_000);
+      document.addEventListener("visibilitychange", refresh);
+      return () => {
+        window.clearInterval(timer);
+        document.removeEventListener("visibilitychange", refresh);
+      };
+    }
+
+    const listingIds = new Set(visibleListingIds.split(","));
+    const socket = io({ withCredentials: true, reconnection: true });
+    socket.on("connect", () => {
+      for (const listingId of listingIds) {
+        socket.emit("auction:subscribe", listingId);
+      }
+    });
+    socket.on("auction:updated", (event: { listingId?: string }) => {
+      if (event.listingId && listingIds.has(event.listingId)) void reload(page, false);
+    });
+    return () => { socket.disconnect(); };
+  }, [isAuthenticated, page, reload, visibleListingIds]);
   const refreshExpiredListing = useCallback(async (listingId: string) => {
     try {
       await api(`/listings/${listingId}`);
@@ -390,6 +441,7 @@ function ListingDetail() {
   const [bid, setBid] = useState("");
   const [handover, setHandover] = useState<{ sellerConfirmedAt: string | null; buyerConfirmedAt: string | null; failedPickupAt: string | null } | null>(null);
   const [canceling, setCanceling] = useState(false);
+  const [decisionInProgress, setDecisionInProgress] = useState(false);
   const load = useCallback(async () => {
     setError("");
     try {
@@ -405,7 +457,18 @@ function ListingDetail() {
   const timer = useLiveCountdown(item?.closesAt, () => { void load(); });
   useEffect(() => {
     if (!id) return;
-    const socket = io({ withCredentials: true, reconnection: true, autoConnect: isAuthenticated });
+    if (!isAuthenticated) {
+      const refresh = () => {
+        if (!document.hidden) void load();
+      };
+      const interval = window.setInterval(refresh, 15_000);
+      document.addEventListener("visibilitychange", refresh);
+      return () => {
+        window.clearInterval(interval);
+        document.removeEventListener("visibilitychange", refresh);
+      };
+    }
+    const socket = io({ withCredentials: true, reconnection: true });
     socket.on("connect", () => socket.emit("auction:subscribe", id, () => void load()));
     socket.on("auction:updated", (event: { listingId?: string }) => {
       if (event.listingId === id) void load();
@@ -441,11 +504,14 @@ function ListingDetail() {
     } catch (failure) { toast(messageOf(failure), "error"); }
   };
   const decide = async (decision: "approve" | "reject") => {
+    if (decisionInProgress) return;
+    setDecisionInProgress(true);
     try {
       await api(`/listings/${id}/decision`, { method: "POST", body: JSON.stringify({ decision }) });
       toast(decision === "approve" ? "Auction approved. The item is reserved." : "Seller rejection recorded.");
       await load();
     } catch (failure) { toast(messageOf(failure), "error"); }
+    finally { setDecisionInProgress(false); }
   };
 
   if (loading) return <div className="page-shell py-16"><ListingSkeleton /></div>;
@@ -461,8 +527,7 @@ function ListingDetail() {
   const canReviewWinningBid = isSeller
     && item.biddingStatus === "Closed"
     && item.saleOutcome === "Pending seller decision"
-    && item.bidHistory.length > 0
-    && item.hasProvisionalWinner === true;
+    && item.provisionalWinner !== undefined;
   const cancel = async () => {
     if (!window.confirm("Cancel this auction? Existing bids and history will be preserved, and all bidders will be notified.")) return;
     setCanceling(true);
@@ -529,9 +594,12 @@ function ListingDetail() {
           {isSeller && isOpen && <p className="mt-4 rounded-xl bg-canvas p-3 text-sm text-ink/60">Bidding is open. The current leading bid and minimum next bid are shown above.</p>}
           {isSeller && (canEdit || canCancel) && <div className="mt-5 flex gap-2">{canEdit && item.bidHistory.length === 0 && <Link className="button-outline flex-1" to={`/listings/${id}/edit`}>Edit listing</Link>}{canCancel && <button className="button-outline flex-1" disabled={canceling} onClick={() => void cancel()}>{canceling ? "Cancelling…" : "Cancel auction"}</button>}</div>}
           {isSeller && item.bidHistory.length > 0 && <p className="mt-4 text-xs text-ink/50">Listing edits are locked after the first accepted bid. You may still cancel the auction; bid history is preserved.</p>}
-          {canReviewWinningBid && <div className="mt-5 rounded-2xl border border-sun/40 bg-[#fff9f0] p-4">
-            <p className="font-semibold">Review the provisional winner</p><p className="mt-1 text-sm text-ink/60">Approve to reserve the item, or reject the winning bid.</p>
-            <div className="mt-4 flex gap-2"><button className="button-primary flex-1" onClick={() => void decide("approve")}>Approve Winning Bid</button><button className="button-outline flex-1" onClick={() => void decide("reject")}>Reject Winning Bid</button></div>
+          {canReviewWinningBid && item.provisionalWinner && <div className="mt-5 rounded-2xl border border-sun/40 bg-sun/10 p-4">
+            <p className="font-semibold">Review the provisional winner</p>
+            <p className="mt-2 text-sm text-ink/70">Winning bid: <strong>{formatRupees(item.provisionalWinner.amount)}</strong></p>
+            <p className="mt-1 text-sm text-ink/70">Winning bidder: <strong>{item.provisionalWinner.displayName}</strong></p>
+            <p className="mt-2 text-sm text-ink/60">Approve to reserve the item, or reject the winning bid.</p>
+            <div className="mt-4 flex gap-2"><button className="button-primary flex-1" disabled={decisionInProgress} onClick={() => void decide("approve")}>{decisionInProgress ? "Saving…" : "Approve Winning Bid"}</button><button className="button-outline flex-1" disabled={decisionInProgress} onClick={() => void decide("reject")}>{decisionInProgress ? "Saving…" : "Reject Winning Bid"}</button></div>
           </div>}
           {item.saleOutcome === "Pending seller decision" && !isSeller && <p className="mt-4 rounded-xl bg-canvas p-3 text-sm text-ink/60">This auction has closed. The seller is reviewing the leading bid.</p>}
           {item.saleOutcome === "Awaiting handover" && user && (isSeller || isWinner) && <div className="mt-5 rounded-2xl bg-mint p-4">
@@ -547,7 +615,7 @@ function ListingDetail() {
           </div>}
           {item.saleOutcome === "Completed" && <p className="mt-5 rounded-2xl bg-mint p-4 font-semibold text-forest">Sale completed · handover confirmed by both parties.</p>}
           {item.saleOutcome === "Rejected" && <p className="mt-5 rounded-2xl bg-canvas p-4 text-sm text-ink/65">The seller declined this winning bid.</p>}
-          {item.saleOutcome === "Failed pickup" && <p className="mt-5 rounded-2xl bg-[#fff9f0] p-4 text-sm text-ink/65">A failed pickup was recorded. The seller can review the item before relisting.</p>}
+          {item.saleOutcome === "Failed pickup" && <p className="mt-5 rounded-2xl bg-sun/10 p-4 text-sm text-ink/65">A failed pickup was recorded. The seller can review the item before relisting.</p>}
           {item.saleOutcome === "Unsold" && <p className="mt-5 rounded-2xl bg-canvas p-4 text-sm text-ink/65">No bids were received. This item is unsold.</p>}
           {item.saleOutcome === "Cancelled" && <p className="mt-5 rounded-2xl bg-canvas p-4 text-sm text-ink/65">This auction was cancelled by the seller.</p>}
           <div className="mt-6 border-t border-line pt-5 text-xs leading-5 text-ink/50">CampusBid displays the server's accepted bids. The countdown is informational; the server decides whether a bid arrives before closing.</div>
@@ -619,7 +687,7 @@ function AuthPage({ mode }: { mode: "login" | "register" }) {
       <h1 className="mt-3 font-display text-4xl">{registering ? "Create your account" : "Good to see you."}</h1>
       <p className="mt-3 text-sm leading-6 text-ink/60">{registering ? "Register with your Kongu college email address." : "Sign in to bid, manage listings, and meet your campus community."}</p>
       {error && <ErrorBanner message={error} />}
-      {verificationToken ? <div className="mt-6 rounded-2xl border border-sun/40 bg-[#fff9f0] p-5">
+      {verificationToken ? <div className="mt-6 rounded-2xl border border-sun/40 bg-sun/10 p-5">
         <p className="font-semibold">Verify your email (local development)</p>
         <p className="mt-2 text-sm leading-6 text-ink/65">Email delivery is not configured in local development. Use the one-time token shown here; production verification is sent by the configured email provider.</p>
         <label className="field-label mt-4" htmlFor="verify-token">One-time verification token</label>
@@ -880,7 +948,7 @@ function ListingForm({ edit = false }: { edit?: boolean }) {
         <Field label="Minimum increment (₹)" error={form.formState.errors.minimumIncrement?.message}><input className="field" type="number" min="0.01" step="0.01" {...form.register("minimumIncrement", { valueAsNumber: true })} /></Field>
       </div>
       <Field label="Auction closes" error={form.formState.errors.closesAt?.message}><input className="field" type="datetime-local" min={minDateTime()} {...form.register("closesAt")} /></Field>
-      <div className="rounded-2xl bg-[#fff9f0] p-4 text-sm leading-6 text-ink/70"><strong className="text-ink">Auction rule:</strong> your first bid must meet the starting price; each later manual bid must beat the leading bid by at least the minimum increment.</div>
+      <div className="rounded-2xl bg-sun/10 p-4 text-sm leading-6 text-ink/70"><strong className="text-ink">Auction rule:</strong> your first bid must meet the starting price; each later manual bid must beat the leading bid by at least the minimum increment.</div>
       <button className="button-primary w-full !py-3.5" disabled={form.formState.isSubmitting || uploading}>{form.formState.isSubmitting ? "Saving…" : edit ? "Save listing" : "Publish auction"}</button>
     </form>
   </div>;
@@ -900,6 +968,37 @@ function Dashboard() {
       <p className="mt-2 max-w-2xl text-sm leading-6 text-ink/60">Bid on things you need. List things someone else can use. CampusBid keeps every auction and handover attached to the same student account.</p>
       <Link to="/" className="mt-5 inline-flex font-semibold text-forest">Explore live auctions <span className="ml-2">↗</span></Link>
     </div>
+  </div>;
+}
+
+function Profile() {
+  const { user } = useAuth();
+  const { logout } = useOutletContext<{ logout: () => Promise<void> }>();
+  if (!user) return null;
+
+  return <div className="page-shell max-w-3xl py-10 md:py-14">
+    <p className="section-kicker">Your account</p>
+    <h1 className="mt-2 font-display text-4xl">Profile</h1>
+    <section aria-label="Profile details" className="mt-8 rounded-[28px] border border-line bg-white p-6 shadow-card sm:p-8">
+      <div className="flex items-center gap-4 border-b border-line pb-6">
+        <span className="avatar-button !h-14 !w-14 text-lg" aria-hidden="true">{initials(user.displayName)}</span>
+        <div>
+          <h2 className="text-xl font-bold">{user.displayName}</h2>
+          <p className="mt-1 text-sm text-ink/60">{user.email}</p>
+        </div>
+      </div>
+      <dl className="grid gap-5 pt-6 sm:grid-cols-2">
+        <div><dt className="text-xs font-semibold uppercase tracking-wide text-ink/50">Name</dt><dd className="mt-1 font-medium">{user.displayName}</dd></div>
+        <div><dt className="text-xs font-semibold uppercase tracking-wide text-ink/50">College email</dt><dd className="mt-1 font-medium">{user.email}</dd></div>
+        <div><dt className="text-xs font-semibold uppercase tracking-wide text-ink/50">Email verification</dt><dd className="mt-1"><Badge tone={user.verified ? "green" : "neutral"}>{user.verified ? "Verified" : "Not verified"}</Badge></dd></div>
+        <div><dt className="text-xs font-semibold uppercase tracking-wide text-ink/50">Mobile number</dt><dd className="mt-1 text-ink/60">Not provided</dd></div>
+      </dl>
+      <div className="mt-8 border-t border-line pt-6">
+        <h2 className="font-semibold">Sign out</h2>
+        <p className="mt-1 text-sm text-ink/60">You will need to log in again to access your account.</p>
+        <button type="button" className="mt-4 inline-flex items-center justify-center rounded-xl border border-red-300 px-4 py-2.5 text-sm font-semibold text-red-700 transition hover:bg-red-50" onClick={() => void logout()}>Log Out</button>
+      </div>
+    </section>
   </div>;
 }
 

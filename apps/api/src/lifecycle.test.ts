@@ -120,9 +120,19 @@ describe("CampusBid basic auction lifecycle", () => {
     const closed = await first.agent.get(`/api/listings/${listingId}`);
     expect(closed.body.listing.biddingStatus).toBe("Closed");
     expect(closed.body.listing.saleOutcome).toBe("Pending seller decision");
-
+    const sellerReview = await seller.agent.get(`/api/listings/${listingId}`);
+    expect(sellerReview.body.listing.provisionalWinner).toMatchObject({
+      amount: 240
+    });
+    expect(sellerReview.body.listing.provisionalWinner.displayName).toBe(
+      details.body.bidHistory.find((bid: { amount: number }) => bid.amount === 240).bidderAlias
+    );
+    expect(closed.body.listing.provisionalWinner).toBeUndefined();
     expect((await second.agent.post(`/api/listings/${listingId}/decision`).send({ decision: "approve" })).status).toBe(409);
     expect((await seller.agent.post(`/api/listings/${listingId}/decision`).send({ decision: "approve" })).status).toBe(200);
+    expect((await seller.agent.get(`/api/listings/${listingId}`)).body.listing.saleOutcome).toBe("Awaiting handover");
+
+    expect((await seller.agent.post(`/api/listings/${listingId}/decision`).send({ decision: "approve" })).status).toBe(409);
     expect((await seller.agent.get(`/api/listings/${listingId}/handover`)).status).toBe(200);
 
     const firstIsWinner = (await first.agent.get(`/api/listings/${listingId}`)).body.listing.isProvisionalWinner;
@@ -135,7 +145,10 @@ describe("CampusBid basic auction lifecycle", () => {
     expect((await seller.agent.post(`/api/listings/${listingId}/cancel`)).status).toBe(409);
     expect((await seller.agent.post(`/api/listings/${listingId}/decision`).send({ decision: "reject" })).status).toBe(409);
 
-    expect((await seller.agent.get("/api/notifications")).body.items.length).toBeGreaterThan(0);
+    const sellerNotifications = (await seller.agent.get("/api/notifications")).body.items as Array<{ type: string }>;
+    expect(sellerNotifications.length).toBeGreaterThan(0);
+    const winnerNotifications = (await winner.agent.get("/api/notifications")).body.items as Array<{ type: string }>;
+    expect(winnerNotifications.some((notification) => notification.type === "seller_approved")).toBe(true);
     expect((await first.agent.get("/api/dashboard")).body.bids.length).toBeGreaterThan(0);
     const notification = (await seller.agent.get("/api/notifications")).body.items[0];
     expect((await seller.agent.post(`/api/notifications/${notification.id}/read`)).body.read).toBe(true);
@@ -181,7 +194,9 @@ describe("CampusBid basic auction lifecycle", () => {
     expect((await buyer.agent.post(`/api/listings/${failedId}/bids`).send({ amount: 200 })).status).toBe(201);
     now = new Date(now.getTime() + 15_000);
     expect(await closeExpiredAuctions(now)).toBe(1);
-    expect((await seller.agent.get(`/api/listings/${noBidId}`)).body.listing.saleOutcome).toBe("Unsold");
+    const unsold = await seller.agent.get(`/api/listings/${noBidId}`);
+    expect(unsold.body.listing.saleOutcome).toBe("Unsold");
+    expect(unsold.body.listing.provisionalWinner).toBeUndefined();
     expect((await seller.agent.post(`/api/listings/${noBidId}/cancel`)).status).toBe(409);
     expect((await seller.agent.post(`/api/listings/${noBidId}/decision`).send({ decision: "approve" })).status).toBe(409);
     expect((await seller.agent.get(`/api/listings/${rejectedId}`)).body.listing.biddingStatus).toBe("Open");
@@ -191,10 +206,43 @@ describe("CampusBid basic auction lifecycle", () => {
     expect((await seller.agent.post(`/api/listings/${rejectedId}/decision`).send({ decision: "reject" })).status).toBe(200);
     expect((await seller.agent.get(`/api/listings/${rejectedId}`)).body.listing.saleOutcome).toBe("Rejected");
     expect((await seller.agent.post(`/api/listings/${rejectedId}/decision`).send({ decision: "approve" })).status).toBe(409);
+    expect((await buyer.agent.get("/api/notifications")).body.items.some((item: { type: string; listingId: string }) => item.type === "seller_rejected" && item.listingId === rejectedId)).toBe(true);
     expect((await buyer.agent.post(`/api/listings/${failedId}/decision`).send({ decision: "approve" })).status).toBe(409);
     expect((await seller.agent.post(`/api/listings/${failedId}/decision`).send({ decision: "approve" })).status).toBe(200);
     expect((await buyer.agent.post(`/api/listings/${failedId}/handover/failed-pickup`)).status).toBe(204);
     expect((await seller.agent.get(`/api/listings/${failedId}`)).body.listing.saleOutcome).toBe("Failed pickup");
+  });
+
+  it("does not rate-limit current-user checks but limits failed authentication mutations", async () => {
+    const limitedApp = createApp({
+      now: () => new Date(now),
+      emitAuctionUpdate: () => undefined,
+      skipAuthRateLimits: false
+    });
+    const currentUserChecks = await Promise.all(
+      Array.from({ length: 40 }, () => supertest(limitedApp).get("/api/auth/me"))
+    );
+    expect(currentUserChecks.every((response) => response.status === 200)).toBe(true);
+
+    const failedLogins = await Promise.all(
+      Array.from({ length: 10 }, () => supertest(limitedApp).post("/api/auth/login").send({
+        email: "missing@kongu.edu",
+        password: "incorrect"
+      }))
+    );
+    expect(failedLogins.every((response) => response.status === 401)).toBe(true);
+    const limitedLogin = await supertest(limitedApp).post("/api/auth/login").send({
+      email: "missing@kongu.edu",
+      password: "incorrect"
+    });
+    expect(limitedLogin.status).toBe(429);
+    expect(Number(limitedLogin.headers["retry-after"])).toBeGreaterThan(0);
+    const limitedRegistration = await supertest(limitedApp).post("/api/auth/register").send({
+      email: "new@kongu.edu",
+      password: "CampusBid@123",
+      displayName: "New Student"
+    });
+    expect(limitedRegistration.status).toBe(429);
   });
 
   it("rejects invalid photo references and invalid combined price ranges", async () => {

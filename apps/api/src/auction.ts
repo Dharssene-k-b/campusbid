@@ -18,7 +18,7 @@ export async function makeNotification(
   );
 }
 
-function winningBid(bids: BidRecord[] | undefined, startingPricePaise: number): BidRecord | undefined {
+export function getWinningBid(bids: BidRecord[] | undefined, startingPricePaise: number): BidRecord | undefined {
   return (bids ?? [])
     .filter((bid) => Number.isSafeInteger(bid.amountPaise)
       && bid.amountPaise >= startingPricePaise
@@ -37,7 +37,7 @@ export async function closeExpiredAuctions(
   const expired = await Listing.find(selector).select("_id sellerId title bidHistory startingPricePaise");
   let closed = 0;
   for (const candidate of expired) {
-    const leadingBid = winningBid(candidate.bidHistory, candidate.startingPricePaise);
+    const leadingBid = getWinningBid(candidate.bidHistory, candidate.startingPricePaise);
     const listing = await Listing.findOneAndUpdate(
       { _id: candidate._id, biddingStatus: "Open", closesAt: { $lte: now } },
       {
@@ -82,7 +82,7 @@ export async function decideSale(
     provisionalWinnerId: { $ne: null }
   });
   if (!listing || !listing.provisionalWinnerId) throw new Error("This auction is not awaiting your decision.");
-  const persistedWinner = winningBid(listing.bidHistory, listing.startingPricePaise);
+  const persistedWinner = getWinningBid(listing.bidHistory, listing.startingPricePaise);
   if (!persistedWinner || !persistedWinner.bidderId.equals(listing.provisionalWinnerId)) {
     throw new Error("This auction has no valid provisional winning bid.");
   }

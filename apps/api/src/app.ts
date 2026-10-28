@@ -149,7 +149,7 @@ const listingSchema = z.object({
   description: z.string().trim().min(10).max(4000),
   condition: z.enum(["New", "Like New", "Good", "Fair", "Poor"]),
   photos: z.array(z.string().refine((value) => {
-    if (/^\/uploads\/[a-zA-Z0-9._-]+$/.test(value)) return true;
+    if (/^\/(?:api\/)?uploads\/[a-zA-Z0-9._-]+$/.test(value)) return true;
     try { return new URL(value).protocol === "https:"; } catch { return false; }
   }, "Photo must be an uploaded local or secure hosted image.")).min(1).max(5),
   startingPrice: z.number().finite().positive().max(1_000_000),
@@ -173,6 +173,7 @@ export function createApp(services: AppServices = defaultServices) {
   app.use(express.json({ limit: "32kb" }));
   app.use(sessionMiddleware);
   app.use("/uploads", express.static(uploadsDirectory, { dotfiles: "deny", index: false, maxAge: "1h" }));
+  app.use("/api/uploads", express.static(uploadsDirectory, { dotfiles: "deny", index: false, maxAge: "1h" }));
   const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 30,
@@ -306,7 +307,7 @@ export function createApp(services: AppServices = defaultServices) {
       await fs.mkdir(uploadsDirectory, { recursive: true });
       const name = `${randomBytes(18).toString("hex")}.${detected.ext}`;
       await fs.writeFile(path.join(uploadsDirectory, name), file.buffer, { flag: "wx" });
-      url = `/uploads/${name}`;
+      url = `/api/uploads/${name}`;
     }
     await PhotoAsset.create({ ownerId: req.session.userId, url, mimeType: detected.mime });
     return res.status(201).json({ url });

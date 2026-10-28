@@ -12,10 +12,13 @@ export function formatTime(value: string | Date): string {
 }
 
 export function countdown(value: string, now: number): string {
-  const difference = Math.max(0, new Date(value).getTime() - now);
-  const hours = Math.floor(difference / 3_600_000);
-  const minutes = Math.floor((difference % 3_600_000) / 60_000);
-  const seconds = Math.floor((difference % 60_000) / 1000);
-  if (hours > 24) return `${Math.floor(hours / 24)}d ${hours % 24}h`;
-  return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+  const difference = new Date(value).getTime() - now;
+  if (!Number.isFinite(difference) || difference <= 0) return "Auction ended";
+  const totalSeconds = Math.floor(difference / 1000);
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  const clock = `${hours.toString().padStart(2, "0")}h ${minutes.toString().padStart(2, "0")}m ${seconds.toString().padStart(2, "0")}s`;
+  return days > 0 ? `${days.toString().padStart(2, "0")}d ${clock}` : clock;
 }

@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type { Listing } from "./types";
 
+const student = { id: "student-id", email: "student@kongu.edu", displayName: "Kongu Student", verified: true };
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -47,7 +49,7 @@ function installApi(options: {
     }
     if (url.endsWith("/uploads") && init?.method === "POST") {
       const file = (init.body as FormData).get("photo") as File;
-      return options.upload?.(file) ?? Response.json({ url: `/uploads/${file.name}` }, { status: 201 });
+      return options.upload?.(file) ?? Response.json({ url: `/api/uploads/${file.name}` }, { status: 201 });
     }
     if (url.endsWith("/listings") && init?.method === "POST") return Response.json({ listing: auction }, { status: 201 });
     return Response.json({ error: `Unexpected test request ${init?.method ?? "GET"} ${url}` }, { status: 404 });
@@ -56,8 +58,6 @@ function installApi(options: {
 }
 
 describe("CampusBid photo upload UX", () => {
-  const student = { id: "student-id", email: "student@kongu.edu", displayName: "Kongu Student", verified: true };
-
   it("uploads dropped images, previews them, and allows removing an individual photo", async () => {
     installApi({ currentUser: student });
     render(<MemoryRouter initialEntries={["/listings/new"]}><App /></MemoryRouter>);
@@ -69,7 +69,7 @@ describe("CampusBid photo upload UX", () => {
     fireEvent.drop(dropZone, { dataTransfer: { files: [image] } });
 
     const preview = await screen.findByAltText("Auction item preview");
-    expect(preview).toHaveAttribute("src", "/uploads/calculator.png");
+    expect(preview).toHaveAttribute("src", "/api/uploads/calculator.png");
     fireEvent.click(screen.getByRole("button", { name: "Remove photo" }));
     await waitFor(() => expect(screen.queryByAltText("Auction item preview")).not.toBeInTheDocument());
   });
@@ -88,8 +88,8 @@ describe("CampusBid photo upload UX", () => {
 
     const localPreview = await screen.findByAltText("instant.png preview");
     expect(localPreview.getAttribute("src")).toMatch(/^blob:/);
-    completeUpload?.(Response.json({ url: "/uploads/instant.png" }, { status: 201 }));
-    expect(await screen.findByAltText("Auction item preview")).toHaveAttribute("src", "/uploads/instant.png");
+    completeUpload?.(Response.json({ url: "/api/uploads/instant.png" }, { status: 201 }));
+    expect(await screen.findByAltText("Auction item preview")).toHaveAttribute("src", "/api/uploads/instant.png");
   });
 
   it.each([
@@ -177,5 +177,78 @@ describe("CampusBid auction status actions", () => {
 
     await screen.findByText("This auction was cancelled by the seller.");
     expect(screen.queryByRole("button", { name: "Cancel auction" })).not.toBeInTheDocument();
+  });
+
+  it("uses accessible image URLs and shows an error fallback on cards and details", async () => {
+    const auction = listing({ photos: ["/uploads/photo.png"] });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/auth/me")) return Response.json({ user: null });
+      if (url.includes("/listings?")) return Response.json({ items: [auction], total: 1, pages: 1 });
+      if (url.includes("/listings/")) return Response.json({ listing: auction, bidHistory: auction.bidHistory });
+      return Response.json({ error: "Unexpected request." }, { status: 404 });
+    });
+    const view = render(<MemoryRouter><App /></MemoryRouter>);
+    const cardImage = await screen.findByRole("img", { name: "Campus calculator" });
+    expect(cardImage).toHaveAttribute("src", "/api/uploads/photo.png");
+    fireEvent.error(cardImage);
+    expect(await screen.findByRole("img", { name: "Campus calculator: photo unavailable" })).toBeInTheDocument();
+
+    view.unmount();
+    render(<MemoryRouter initialEntries={["/listings/507f1f77bcf86cd799439011"]}><App /></MemoryRouter>);
+    const detailImage = await screen.findByRole("img", { name: "Campus calculator" });
+    expect(detailImage).toHaveAttribute("src", "/api/uploads/photo.png");
+    fireEvent.error(detailImage);
+    expect(await screen.findByRole("img", { name: "Campus calculator: photo unavailable" })).toBeInTheDocument();
+  });
+
+  it("recalculates the countdown on focus and refreshes the auction when it expires", async () => {
+    let currentTime = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => currentTime);
+    const auction = listing({ closesAt: new Date(currentTime + 60_000).toISOString() });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/auth/me")) return Response.json({ user: null });
+      if (url.includes("/listings?")) return Response.json({ items: [auction], total: 1, pages: 1 });
+      if (url.includes("/listings/")) return Response.json({ listing: auction, bidHistory: auction.bidHistory });
+      return Response.json({ error: "Unexpected request." }, { status: 404 });
+    });
+    render(<MemoryRouter><App /></MemoryRouter>);
+
+    expect(await screen.findByLabelText(/^Time remaining:/)).toHaveTextContent("00h 01m 00s");
+    currentTime += 61_000;
+    fireEvent.focus(window);
+
+    expect(await screen.findByLabelText("Time remaining: Auction ended")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/listings/507f1f77bcf86cd799439011"))).toBe(true);
+    });
+  });
+
+  it("restores a listing form draft and clears it after successful submission", async () => {
+    const draftKey = "campusbid:listing-draft:new";
+    sessionStorage.setItem(draftKey, JSON.stringify({
+      values: {
+        title: "Persisted calculator",
+        category: "Calculators",
+        condition: "Good",
+        description: "A tested item restored from this browser session.",
+        startingPrice: 200,
+        minimumIncrement: 20,
+        closesAt: new Date(Date.now() + 60 * 60 * 1000 - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
+      },
+      photos: ["/api/uploads/saved.png"]
+    }));
+    installApi({ currentUser: student });
+    const view = render(<MemoryRouter initialEntries={["/listings/new"]}><App /></MemoryRouter>);
+    expect(await screen.findByLabelText("Item title")).toHaveValue("Persisted calculator");
+    expect(JSON.stringify(sessionStorage.getItem(draftKey))).not.toContain("password");
+    view.unmount();
+
+    installApi({ currentUser: student });
+    render(<MemoryRouter initialEntries={["/listings/new"]}><App /></MemoryRouter>);
+    expect(await screen.findByLabelText("Item title")).toHaveValue("Persisted calculator");
+    fireEvent.click(screen.getByRole("button", { name: "Publish auction" }));
+    await waitFor(() => expect(sessionStorage.getItem(draftKey)).toBeNull());
   });
 });

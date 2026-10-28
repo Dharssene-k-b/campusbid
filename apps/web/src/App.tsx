@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useCallback, useEffect, useRef, useState, createContext, useContext, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, createContext, useContext, type FormEvent, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
 import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { io } from "socket.io-client";
@@ -184,6 +184,14 @@ function Marketplace() {
     }
   }, [filterKey]);
   useEffect(() => { void reload(); }, [reload]);
+  const refreshExpiredListing = useCallback(async (listingId: string) => {
+    try {
+      await api(`/listings/${listingId}`);
+      await reload(page);
+    } catch (failure) {
+      setError(messageOf(failure));
+    }
+  }, [page, reload]);
   const updateFilter = (key: string, value: string) => {
     const next = new URLSearchParams(search);
     if (value) next.set(key, value);
@@ -258,7 +266,7 @@ function Marketplace() {
         {loading ? <ListingSkeleton /> : items.length ? (
           <>
             <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-              {items.map((item) => <ListingCard key={item._id} item={item} />)}
+              {items.map((item) => <ListingCard key={item._id} item={item} onExpired={refreshExpiredListing} />)}
             </div>
             {pages > 1 && <div className="mt-8 flex items-center justify-center gap-4">
               <button className="button-outline" disabled={page <= 1} onClick={() => void reload(page - 1)}>Previous</button>
@@ -276,19 +284,15 @@ function SelectFilter({ label, value, onChange, options, display }: { label: str
   return <label className="filter-field"><span>{label}</span><select value={value} onChange={(event) => onChange(event.target.value)}><option value="">{label === "Sort by" ? "Ending soon" : "All"}</option>{options.map((option, index) => <option key={option} value={option}>{display?.[index] ?? option}</option>)}</select></label>;
 }
 
-function ListingCard({ item }: { item: Listing }) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
+function ListingCard({ item, onExpired }: { item: Listing; onExpired: (listingId: string) => Promise<void> }) {
+  const timer = useLiveCountdown(item.closesAt, () => { void onExpired(item._id); });
   return (
     <article className="group overflow-hidden rounded-[26px] border border-line bg-white shadow-card transition hover:-translate-y-1 hover:shadow-lg">
       <Link to={`/listings/${item._id}`} className="block no-underline">
         <div className="relative aspect-[1.45] overflow-hidden bg-[#e8ece4]">
-          {item.photos[0] ? <img src={item.photos[0]} alt={item.title} className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]" /> : <PhotoPlaceholder category={item.category} />}
+          {item.photos[0] ? <ListingImage src={item.photos[0]} alt={item.title} category={item.category} className="h-full w-full transition duration-500 group-hover:scale-[1.03]" /> : <PhotoPlaceholder category={item.category} />}
           <span className="absolute left-4 top-4 rounded-full bg-white/90 px-3 py-1 text-xs font-semibold text-forest">{item.category}</span>
-          <span className="absolute bottom-4 right-4 rounded-full bg-ink/85 px-3 py-1.5 font-mono text-xs font-medium text-white" aria-label={`Time remaining: ${countdown(item.closesAt, now)}`}>◷ {countdown(item.closesAt, now)}</span>
+          <span className="absolute bottom-4 right-4 rounded-full bg-ink/85 px-3 py-1.5 font-mono text-xs font-medium text-white" aria-label={`Time remaining: ${timer.text}`}>◷ {timer.text}</span>
         </div>
         <div className="p-5">
           <div className="flex items-start justify-between gap-3">
@@ -305,9 +309,62 @@ function ListingCard({ item }: { item: Listing }) {
   );
 }
 
+function useLiveCountdown(closesAt: string | undefined, onExpired?: () => void) {
+  const [now, setNow] = useState(() => Date.now());
+  const onExpiredRef = useRef(onExpired);
+  const expiredNotified = useRef<string | null>(null);
+  onExpiredRef.current = onExpired;
+
+  useEffect(() => {
+    const update = () => {
+      const current = Date.now();
+      setNow(current);
+      if (closesAt && new Date(closesAt).getTime() <= current && expiredNotified.current !== closesAt) {
+        expiredNotified.current = closesAt;
+        onExpiredRef.current?.();
+      }
+    };
+    update();
+    const timer = window.setInterval(update, 1000);
+    document.addEventListener("visibilitychange", update);
+    window.addEventListener("focus", update);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", update);
+      window.removeEventListener("focus", update);
+    };
+  }, [closesAt]);
+
+  const difference = closesAt ? new Date(closesAt).getTime() - now : Number.POSITIVE_INFINITY;
+  const expired = closesAt !== undefined && difference <= 0;
+  return { text: closesAt ? countdown(closesAt, now) : "—", expired };
+}
+
+function imageSource(src: string): string {
+  return src.startsWith("/uploads/") ? `/api${src}` : src;
+}
+
+function ListingImage({ src, alt, className, category }: { src: string; alt: string; className: string; category: string }) {
+  const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    setLoaded(false);
+    setFailed(false);
+  }, [src]);
+  if (failed) return <div className={`${className} flex items-center justify-center bg-gradient-to-br from-mint to-[#f0dfc9]`} role="img" aria-label={`${alt}: photo unavailable`}><div className="text-center"><span className="block text-5xl" aria-hidden="true">{categorySymbol(category)}</span><span className="mt-2 block text-sm text-ink/60">Photo unavailable</span></div></div>;
+  return <div className="relative h-full w-full">
+    {!loaded && <div className="skeleton absolute inset-0" aria-label="Loading image" />}
+    <img src={imageSource(src)} alt={alt} onLoad={() => setLoaded(true)} onError={() => setFailed(true)} className={`${className} ${loaded ? "opacity-100" : "opacity-0"} object-cover`} />
+  </div>;
+}
+
 function PhotoPlaceholder({ category }: { category: string }) {
+  return <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-mint to-[#f0dfc9]"><span className="text-7xl" aria-hidden="true">{categorySymbol(category)}</span></div>;
+}
+
+function categorySymbol(category: string): string {
   const symbols: Record<string, string> = { Cycles: "🚲", Calculators: "🧮", Books: "📚", Electronics: "🎧", Other: "✦" };
-  return <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-mint to-[#f0dfc9]"><span className="text-7xl" aria-hidden="true">{symbols[category] ?? "✦"}</span></div>;
+  return symbols[category] ?? "✦";
 }
 
 function ListingSkeleton() {
@@ -325,7 +382,6 @@ function ListingDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [bid, setBid] = useState("");
-  const [now, setNow] = useState(Date.now());
   const [handover, setHandover] = useState<{ sellerConfirmedAt: string | null; buyerConfirmedAt: string | null; failedPickupAt: string | null } | null>(null);
   const [canceling, setCanceling] = useState(false);
   const load = useCallback(async () => {
@@ -340,10 +396,7 @@ function ListingDetail() {
     }
   }, [id]);
   useEffect(() => { void load();   }, [id, load]);
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
+  const timer = useLiveCountdown(item?.closesAt, () => { void load(); });
   useEffect(() => {
     if (!id) return;
     const socket = io({ withCredentials: true, reconnection: true, autoConnect: isAuthenticated });
@@ -393,12 +446,12 @@ function ListingDetail() {
   if (error || !item) return <div className="page-shell py-12"><ErrorBanner message={error || "Auction not found."} onRetry={() => void load()} /></div>;
   const isSeller = item.isSeller ?? false;
   const isWinner = item.isProvisionalWinner ?? false;
-  const isOpen = item.biddingStatus === "Open" && new Date(item.closesAt).getTime() > now;
+  const isOpen = item.biddingStatus === "Open" && !timer.expired;
   const canCancel = isSeller
     && ["Open", "Scheduled"].includes(item.biddingStatus)
     && item.saleOutcome === "Pending seller decision"
-    && new Date(item.closesAt).getTime() > now;
-  const canEdit = isSeller && item.biddingStatus === "Open" && new Date(item.closesAt).getTime() > now;
+    && !timer.expired;
+  const canEdit = isSeller && item.biddingStatus === "Open" && !timer.expired;
   const canReviewWinningBid = isSeller
     && item.biddingStatus === "Closed"
     && item.saleOutcome === "Pending seller decision"
@@ -423,9 +476,9 @@ function ListingDetail() {
       <div className="grid items-start gap-8 lg:grid-cols-[1.1fr_.9fr]">
         <div>
           <div className="overflow-hidden rounded-[30px] border border-line bg-white shadow-card">
-            {item.photos.length ? <img src={item.photos[0]} alt={item.title} className="aspect-[1.2] w-full object-cover" /> : <div className="aspect-[1.2]"><PhotoPlaceholder category={item.category} /></div>}
+            {item.photos.length ? <ListingImage src={item.photos[0]} alt={item.title} category={item.category} className="aspect-[1.2] w-full" /> : <div className="aspect-[1.2]"><PhotoPlaceholder category={item.category} /></div>}
           </div>
-          {item.photos.length > 1 && <div className="mt-3 grid grid-cols-4 gap-3">{item.photos.slice(1).map((photo) => <img key={photo} src={photo} alt={`${item.title} alternate view`} className="aspect-square w-full rounded-2xl border border-line object-cover" />)}</div>}
+          {item.photos.length > 1 && <div className="mt-3 grid grid-cols-4 gap-3">{item.photos.slice(1).map((photo) => <ListingImage key={photo} src={photo} alt={`${item.title} alternate view`} category={item.category} className="aspect-square w-full rounded-2xl border border-line" />)}</div>}
           <div className="mt-8">
             <p className="section-kicker">About this item</p>
             <p className="mt-3 whitespace-pre-wrap leading-7 text-ink/75">{item.description}</p>
@@ -459,7 +512,7 @@ function ListingDetail() {
           </div>
           <div className="mt-4 flex items-center justify-between rounded-2xl border border-line px-4 py-3">
             <span className="text-sm text-ink/60">Time remaining</span>
-            <span className="font-mono font-bold text-ink">{isOpen ? countdown(item.closesAt, now) : item.biddingStatus === "Closed" ? "Auction ended" : item.biddingStatus}</span>
+            <span className="font-mono font-bold text-ink">{isOpen ? timer.text : item.biddingStatus === "Closed" || timer.expired ? "Auction ended" : item.biddingStatus}</span>
           </div>
           {isOpen && user && !isSeller && <form onSubmit={placeBid} className="mt-5">
             <label className="field-label" htmlFor="bid-amount">Your bid (₹)</label>
@@ -604,13 +657,35 @@ const listingFormSchema = z.object({
   closesAt: z.string().min(1)
 });
 type ListingFormInput = z.infer<typeof listingFormSchema>;
+const listingDraftValuesSchema = listingFormSchema.partial();
+type ListingDraft = { values: Partial<ListingFormInput>; photos: string[] };
+
+function readListingDraft(key: string): ListingDraft | null {
+  try {
+    const saved = sessionStorage.getItem(key);
+    if (!saved) return null;
+    const parsed: unknown = JSON.parse(saved);
+    if (!parsed || typeof parsed !== "object") return null;
+    const record = parsed as { values?: unknown; photos?: unknown };
+    const values = listingDraftValuesSchema.safeParse(record.values);
+    const photos = z.array(z.string().min(1)).max(5).safeParse(record.photos);
+    return {
+      values: values.success ? values.data : {},
+      photos: photos.success ? photos.data : []
+    };
+  } catch {
+    return null;
+  }
+}
 
 function ListingForm({ edit = false }: { edit?: boolean }) {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
+  const draftKey = `campusbid:listing-draft:${edit ? id : "new"}`;
+  const initialDraft = useMemo(() => readListingDraft(draftKey), [draftKey]);
   const [item, setItem] = useState<Listing | null>(null);
-  const [photos, setPhotos] = useState<string[]>([]);
+  const [photos, setPhotos] = useState<string[]>(() => initialDraft?.photos ?? []);
   const [pendingPhotoPreviews, setPendingPhotoPreviews] = useState<Array<{ key: string; src: string; name: string }>>([]);
   const [photoError, setPhotoError] = useState("");
   const [error, setError] = useState("");
@@ -622,14 +697,31 @@ function ListingForm({ edit = false }: { edit?: boolean }) {
   const removedPhotoKeys = useRef(new Set<string>());
   const form = useForm<ListingFormInput>({
     resolver: zodResolver(listingFormSchema),
-    defaultValues: { category: "Other", condition: "Good", startingPrice: 100, minimumIncrement: 10 }
+    defaultValues: {
+      category: "Other",
+      condition: "Good",
+      startingPrice: 100,
+      minimumIncrement: 10,
+      ...initialDraft?.values
+    }
   });
   const resetForm = form.reset;
+  useEffect(() => form.watch((values) => {
+    try {
+      sessionStorage.setItem(draftKey, JSON.stringify({
+        values,
+        photos
+      }));
+    } catch {
+      setError("This browser could not save your listing draft. Keep this page open until your listing is submitted.");
+    }
+  }).unsubscribe, [draftKey, form, photos]);
   useEffect(() => {
     if (!edit) return;
     void api<{ listing: Listing }>(`/listings/${id}`).then(({ listing }) => {
       setItem(listing);
-      setPhotos(listing.photos);
+      const restoredDraft = readListingDraft(draftKey);
+      setPhotos(restoredDraft?.photos ?? listing.photos);
       resetForm({
         title: listing.title,
         category: listing.category,
@@ -637,10 +729,11 @@ function ListingForm({ edit = false }: { edit?: boolean }) {
         description: listing.description,
         startingPrice: listing.startingPrice,
         minimumIncrement: listing.minimumIncrement,
-        closesAt: toLocalDateTime(listing.closesAt)
+        closesAt: toLocalDateTime(listing.closesAt),
+        ...restoredDraft?.values
       });
     }).catch((failure) => setError(messageOf(failure)));
-  }, [edit, id, resetForm]);
+  }, [edit, id, resetForm, draftKey]);
 
   const addPhotos = async (files: FileList | null) => {
     if (!files?.length || uploadingPhotos.current) return;
@@ -727,6 +820,7 @@ function ListingForm({ edit = false }: { edit?: boolean }) {
     try {
       if (edit) await api(`/listings/${id}`, { method: "PATCH", body: JSON.stringify(body) });
       else await api("/listings", { method: "POST", body: JSON.stringify(body) });
+      sessionStorage.removeItem(draftKey);
       toast(edit ? "Your listing was updated." : "Your auction is live.");
       navigate(edit ? `/listings/${id}` : "/my-listings");
     } catch (failure) { setError(messageOf(failure)); }
@@ -771,7 +865,7 @@ function ListingForm({ edit = false }: { edit?: boolean }) {
         {photoError && <p role="alert" className="mt-2 text-sm text-red-700">{photoError}</p>}
         {uploading && <p className="mt-2 text-sm text-ink/60">Uploading photos…</p>}
         {(photos.length > 0 || pendingPhotoPreviews.length > 0) && <div className="mt-3 grid grid-cols-3 gap-3 sm:grid-cols-5">
-          {photos.map((photo) => <div key={photo} className="relative overflow-hidden rounded-xl border border-line"><img className="aspect-square w-full object-cover" src={photo} alt="Auction item preview" /><button className="absolute right-1 top-1 rounded-full bg-white px-2 py-1 text-xs shadow" type="button" aria-label="Remove photo" onClick={() => { uploadedPhotoKeys.current.delete(photo); setPhotos((current) => current.filter((value) => value !== photo)); }}>×</button></div>)}
+          {photos.map((photo) => <div key={photo} className="relative overflow-hidden rounded-xl border border-line"><ListingImage className="aspect-square w-full" src={photo} alt="Auction item preview" category={form.getValues("category")} /><button className="absolute right-1 top-1 rounded-full bg-white px-2 py-1 text-xs shadow" type="button" aria-label="Remove photo" onClick={() => { uploadedPhotoKeys.current.delete(photo); setPhotos((current) => current.filter((value) => value !== photo)); }}>×</button></div>)}
           {pendingPhotoPreviews.map((preview) => <div key={preview.key} className="relative overflow-hidden rounded-xl border border-line"><img className="aspect-square w-full object-cover" src={preview.src} alt={`${preview.name} preview`} /><button className="absolute right-1 top-1 rounded-full bg-white px-2 py-1 text-xs shadow" type="button" aria-label={`Remove ${preview.name}`} onClick={() => { removedPhotoKeys.current.add(preview.key); pendingPhotoKeys.current.delete(preview.key); URL.revokeObjectURL(preview.src); setPendingPhotoPreviews((current) => current.filter((value) => value.key !== preview.key)); }}>×</button></div>)}
         </div>}
       </div>
@@ -813,13 +907,21 @@ function MyListings() {
   const [items, setItems] = useState<Listing[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  useEffect(() => {
-    void api<{ items: Listing[] }>("/listings/mine").then((result) => setItems(result.items)).catch((failure) => setError(messageOf(failure))).finally(() => setLoading(false));
+  const reload = useCallback(async () => {
+    try {
+      const result = await api<{ items: Listing[] }>("/listings/mine");
+      setItems(result.items);
+    } catch (failure) {
+      setError(messageOf(failure));
+    } finally {
+      setLoading(false);
+    }
   }, []);
+  useEffect(() => { void reload(); }, [reload]);
   return <div className="page-shell py-10 md:py-14">
     <div className="flex items-end justify-between gap-4"><div><p className="section-kicker">Seller workspace</p><h1 className="mt-2 font-display text-4xl">My listings</h1></div><Link to="/listings/new" className="button-primary">＋ New auction</Link></div>
     {error && <ErrorBanner message={error} />}
-    {loading ? <ListingSkeleton /> : items.length ? <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">{items.map((item) => <ListingCard key={item._id} item={item} />)}</div> : <EmptyState icon="↗" title="No listings yet" message="List an item you no longer need and let another student find it." action={<Link className="button-primary" to="/listings/new">Create your first auction</Link>} />}
+    {loading ? <ListingSkeleton /> : items.length ? <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">{items.map((item) => <ListingCard key={item._id} item={item} onExpired={async (listingId) => { try { await api(`/listings/${listingId}`); await reload(); } catch (failure) { setError(messageOf(failure)); } }} />)}</div> : <EmptyState icon="↗" title="No listings yet" message="List an item you no longer need and let another student find it." action={<Link className="button-primary" to="/listings/new">Create your first auction</Link>} />}
   </div>;
 }
 

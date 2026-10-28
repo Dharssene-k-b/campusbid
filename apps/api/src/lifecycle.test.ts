@@ -37,6 +37,10 @@ async function uploadPhoto(student: Student): Promise<string> {
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/rvsAAAAASUVORK5CYII=", "base64");
   const uploaded = await student.agent.post("/api/uploads").attach("photo", png, { filename: "demo.png", contentType: "image/png" });
   expect(uploaded.status).toBe(201);
+  expect(uploaded.body.url).toMatch(/^\/api\/uploads\/[a-f0-9]+\.png$/);
+  const image = await student.agent.get(uploaded.body.url as string);
+  expect(image.status).toBe(200);
+  expect(image.headers["content-type"]).toContain("image/png");
   return uploaded.body.url as string;
 }
 
